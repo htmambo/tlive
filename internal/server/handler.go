@@ -43,7 +43,14 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-func handleWebSocket(hubs map[string]*hub.Hub) http.HandlerFunc {
+// wsControlMessage represents a JSON control message sent over WebSocket.
+type wsControlMessage struct {
+	Type string `json:"type"`
+	Rows uint16 `json:"rows"`
+	Cols uint16 `json:"cols"`
+}
+
+func handleWebSocket(hubs map[string]*hub.Hub, resizeFuncs map[string]ResizeFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/ws/"), "/")
 		sessionID := parts[0]
@@ -66,6 +73,15 @@ func handleWebSocket(hubs map[string]*hub.Hub) http.HandlerFunc {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {
 				break
+			}
+			var ctrl wsControlMessage
+			if json.Unmarshal(msg, &ctrl) == nil && ctrl.Type == "resize" {
+				if resizeFuncs != nil {
+					if resizeFn, ok := resizeFuncs[sessionID]; ok {
+						resizeFn(ctrl.Rows, ctrl.Cols)
+					}
+				}
+				continue
 			}
 			h.Input(msg)
 		}

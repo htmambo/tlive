@@ -113,6 +113,9 @@ func runCommand(cmd *cobra.Command, args []string) error {
 
 	// Start HTTP server with embedded web assets
 	srv := server.New(store, hubs, "")
+	srv.SetResizeFunc(sess.ID, func(rows, cols uint16) {
+		proc.Resize(rows, cols)
+	})
 	srv.SetWebFS(web.Assets)
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 
