@@ -225,24 +225,49 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// isPrivateIP reports whether ip is an RFC 1918 private address
+// (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16). This filters out
+// VPN/tunnel adapters (e.g. Cloudflare WARP 198.18.0.0/15) that
+// are not reachable from the local network.
+func isPrivateIP(ip net.IP) bool {
+	privateRanges := []struct {
+		network *net.IPNet
+	}{
+		{parseCIDR("10.0.0.0/8")},
+		{parseCIDR("172.16.0.0/12")},
+		{parseCIDR("192.168.0.0/16")},
+	}
+	for _, r := range privateRanges {
+		if r.network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func parseCIDR(s string) *net.IPNet {
+	_, network, _ := net.ParseCIDR(s)
+	return network
+}
+
 func getLocalIP() string {
 	// UDP dial trick: connect to a public IP to find the preferred outbound interface.
 	// No actual traffic is sent since UDP is connectionless.
 	conn, err := net.DialTimeout("udp4", "8.8.8.8:53", 1*time.Second)
 	if err == nil {
 		defer conn.Close()
-		if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok && addr.IP.To4() != nil && !addr.IP.IsLoopback() {
+		if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok && addr.IP.To4() != nil && !addr.IP.IsLoopback() && isPrivateIP(addr.IP) {
 			return addr.IP.String()
 		}
 	}
 
-	// Fallback: iterate interfaces
+	// Fallback: iterate interfaces, prefer private (RFC 1918) IPv4 addresses.
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return "127.0.0.1"
 	}
 	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil {
+		if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() && ipnet.IP.To4() != nil && isPrivateIP(ipnet.IP) {
 			return ipnet.IP.String()
 		}
 	}

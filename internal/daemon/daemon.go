@@ -232,10 +232,21 @@ func (d *Daemon) authMiddleware(next http.Handler) http.Handler {
 		if token == "" {
 			token = r.URL.Query().Get("token")
 		}
+		if token == "" {
+			if cookie, err := r.Cookie("tl_token"); err == nil {
+				token = cookie.Value
+			}
+		}
 		if token != d.token {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		// Set cookie so browser AJAX/WebSocket requests authenticate automatically
+		http.SetCookie(w, &http.Cookie{
+			Name:  "tl_token",
+			Value: d.token,
+			Path:  "/",
+		})
 		next.ServeHTTP(w, r)
 	})
 }
