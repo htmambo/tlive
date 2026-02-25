@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -14,16 +15,30 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/termlive/termlive/internal/config"
-	"github.com/termlive/termlive/internal/hub"
+	"github.com/termlive/termlive/internal/daemon"
 	"github.com/termlive/termlive/internal/notify"
-	ptyPkg "github.com/termlive/termlive/internal/pty"
 	"github.com/termlive/termlive/internal/server"
-	"github.com/termlive/termlive/internal/session"
 	"github.com/termlive/termlive/web"
 
 	qrterminal "github.com/mdp/qrterminal/v3"
 	"golang.org/x/term"
 )
+
+// localOutputClient implements hub.Client to write PTY output to local
+// stdout and feed the idle detector. It is registered on the session hub
+// so that the SessionManager's output goroutine delivers data here.
+type localOutputClient struct {
+	writer       *os.File
+	idleDetector *notify.SmartIdleDetector
+}
+
+func (c *localOutputClient) Send(data []byte) error {
+	c.writer.Write(data)
+	if c.idleDetector != nil {
+		c.idleDetector.Feed(data)
+	}
+	return nil
+}
 
 func runCommand(cmd *cobra.Command, args []string) error {
 	// Load config
@@ -32,27 +47,26 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	cfg.Notify.ShortTimeout = shortTimeout
 	cfg.Notify.LongTimeout = longTimeout
 
-	// Create session
-	store := session.NewStore()
-	sess := session.New(args[0], args[1:])
-	store.Add(sess)
+	// Detect terminal size
+	rows, cols := uint16(24), uint16(80)
+	if w, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
+		cols, rows = uint16(w), uint16(h)
+	}
 
-	// Create hub
-	h := hub.New()
-	go h.Run()
-	hubs := map[string]*hub.Hub{sess.ID: h}
-
-	// Start PTY
-	proc, err := ptyPkg.Start(args[0], args[1:], 24, 80)
+	// Create SessionManager and start managed session
+	mgr := daemon.NewSessionManager()
+	ms, err := mgr.CreateSession(args[0], args[1:], daemon.SessionConfig{
+		Rows: rows,
+		Cols: cols,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to start command: %w", err)
 	}
-	sess.Pid = proc.Pid()
+	defer mgr.StopSession(ms.Session.ID)
 
-	// Hub input -> PTY
-	h.SetInputHandler(func(data []byte) {
-		proc.Write(data)
-	})
+	// Master shutdown context — cancelled on any exit path
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	// Setup notifiers
 	var notifiers []notify.Notifier
@@ -65,7 +79,10 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	multiNotifier := notify.NewMultiNotifier(notifiers...)
 
 	// Setup smart idle detector
-	localIP := getLocalIP()
+	localIP := publicIP
+	if localIP == "" {
+		localIP = getLocalIP()
+	}
 	idleDetector := notify.NewSmartIdleDetector(
 		time.Duration(cfg.Notify.ShortTimeout)*time.Second,
 		time.Duration(cfg.Notify.LongTimeout)*time.Second,
@@ -73,12 +90,12 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		cfg.Notify.Patterns.Processing,
 		func(confidence string) {
 			msg := &notify.NotifyMessage{
-				SessionID:   sess.ID,
-				Command:     sess.Command,
-				Pid:         sess.Pid,
-				Duration:    sess.Duration().Truncate(time.Second).String(),
-				LastOutput:  string(sess.LastOutput(200)),
-				WebURL:      fmt.Sprintf("http://%s:%d/terminal.html?id=%s", localIP, cfg.Server.Port, sess.ID),
+				SessionID:   ms.Session.ID,
+				Command:     ms.Session.Command,
+				Pid:         ms.Session.Pid,
+				Duration:    ms.Session.Duration().Truncate(time.Second).String(),
+				LastOutput:  string(ms.Session.LastOutput(200)),
+				WebURL:      fmt.Sprintf("http://%s:%d/terminal.html?id=%s", localIP, cfg.Server.Port, ms.Session.ID),
 				IdleSeconds: cfg.Notify.ShortTimeout,
 				Confidence:  confidence,
 			}
@@ -92,56 +109,53 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	)
 	idleDetector.Start()
 
-	// PTY output -> local terminal + hub + session buffer
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := proc.Read(buf)
-			if n > 0 {
-				data := buf[:n]
-				os.Stdout.Write(data)
-				h.Broadcast(data)
-				sess.AppendOutput(data)
-				idleDetector.Feed(data)
-			}
-			if err != nil {
-				break
-			}
-		}
-	}()
+	// Register local output client on the hub so that PTY output is
+	// written to local stdout and fed to the idle detector.
+	localClient := &localOutputClient{
+		writer:       os.Stdout,
+		idleDetector: idleDetector,
+	}
+	ms.Hub.Register(localClient)
+	defer ms.Hub.Unregister(localClient)
 
 	// Set terminal to raw mode for proper input pass-through
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
-	if err == nil {
-		defer term.Restore(int(os.Stdin.Fd()), oldState)
-	}
+	rawMode := err == nil
 
-	// Local terminal input -> PTY
+	// Local terminal input -> PTY (exits when ctx cancelled or stdin errors)
 	go func() {
 		buf := make([]byte, 1024)
 		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			n, err := os.Stdin.Read(buf)
 			if n > 0 {
-				proc.Write(buf[:n])
+				ms.Proc.Write(buf[:n])
 			}
 			if err != nil {
-				break
+				return
 			}
 		}
 	}()
 
 	// Start HTTP server with embedded web assets
 	token := generateToken()
-	srv := server.New(store, hubs, token)
-	srv.SetResizeFunc(sess.ID, func(rows, cols uint16) {
-		proc.Resize(rows, cols)
+	srv := server.New(mgr.Store(), mgr.Hubs(), token)
+	srv.SetResizeFunc(ms.Session.ID, func(rows, cols uint16) {
+		ms.Proc.Resize(rows, cols)
 	})
 	srv.SetWebFS(web.Assets)
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 
 	url := fmt.Sprintf("http://%s:%d?token=%s", localIP, cfg.Server.Port, token)
-	fmt.Fprintf(os.Stderr, "\n  TermLive Web UI: %s\n", url)
-	fmt.Fprintf(os.Stderr, "  Session: %s (ID: %s)\n\n", sess.Command, sess.ID)
+	localURL := fmt.Sprintf("http://localhost:%d?token=%s", cfg.Server.Port, token)
+	fmt.Fprintf(os.Stderr, "\n  TermLive Web UI:\n")
+	fmt.Fprintf(os.Stderr, "    Local:   %s\n", localURL)
+	fmt.Fprintf(os.Stderr, "    Network: %s\n", url)
+	fmt.Fprintf(os.Stderr, "  Session: %s (ID: %s)\n\n", ms.Session.Command, ms.Session.ID)
 	qrterminal.GenerateHalfBlock(url, qrterminal.L, os.Stderr)
 	fmt.Fprintln(os.Stderr)
 
@@ -154,8 +168,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 
 	doneCh := make(chan int, 1)
 	go func() {
-		code, _ := proc.Wait()
-		doneCh <- code
+		doneCh <- ms.ExitCode()
 	}()
 
 	var exitCode int
@@ -164,20 +177,43 @@ func runCommand(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(os.Stderr, "\n  Process exited with code %d\n", exitCode)
 	case sig := <-sigCh:
 		fmt.Fprintf(os.Stderr, "\n  Received signal: %v\n", sig)
-		proc.Close()
+		ms.Proc.Close()
 		exitCode = 130
 	}
 
-	// Cleanup
+	// Cleanup: cancel context first to signal all goroutines
+	cancel()
+
+	// Restore terminal BEFORE other cleanup (critical for Windows forced close)
+	if rawMode {
+		term.Restore(int(os.Stdin.Fd()), oldState)
+	}
+
+	// Stop idle detector
 	idleDetector.Stop()
-	h.Stop()
-	sess.Status = session.StatusStopped
-	httpServer.Close()
+
+	// StopSession (hub + PTY + session status) is handled by defer
+
+	// Graceful HTTP shutdown with timeout
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer shutdownCancel()
+	httpServer.Shutdown(shutdownCtx)
 
 	return nil
 }
 
 func getLocalIP() string {
+	// UDP dial trick: connect to a public IP to find the preferred outbound interface.
+	// No actual traffic is sent since UDP is connectionless.
+	conn, err := net.DialTimeout("udp4", "8.8.8.8:53", 1*time.Second)
+	if err == nil {
+		defer conn.Close()
+		if addr, ok := conn.LocalAddr().(*net.UDPAddr); ok && addr.IP.To4() != nil && !addr.IP.IsLoopback() {
+			return addr.IP.String()
+		}
+	}
+
+	// Fallback: iterate interfaces
 	addrs, err := net.InterfaceAddrs()
 	if err != nil {
 		return "127.0.0.1"
