@@ -8,8 +8,9 @@ import (
 )
 
 var (
-	port        int
-	idleTimeout int
+	port         int
+	shortTimeout int
+	longTimeout  int
 )
 
 var rootCmd = &cobra.Command{
@@ -22,7 +23,8 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.Flags().IntVarP(&port, "port", "p", 8080, "Web server port")
-	rootCmd.Flags().IntVarP(&idleTimeout, "timeout", "t", 30, "Idle notification timeout (seconds)")
+	rootCmd.Flags().IntVarP(&shortTimeout, "short-timeout", "s", 30, "Short idle timeout for detected prompts (seconds)")
+	rootCmd.Flags().IntVarP(&longTimeout, "long-timeout", "l", 120, "Long idle timeout for unknown idle (seconds)")
 }
 
 func main() {

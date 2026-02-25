@@ -29,7 +29,8 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	// Load config
 	cfg := config.Default()
 	cfg.Server.Port = port
-	cfg.Notify.IdleTimeout = idleTimeout
+	cfg.Notify.ShortTimeout = shortTimeout
+	cfg.Notify.LongTimeout = longTimeout
 
 	// Create session
 	store := session.NewStore()
@@ -63,11 +64,14 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	}
 	multiNotifier := notify.NewMultiNotifier(notifiers...)
 
-	// Setup idle detector
+	// Setup smart idle detector
 	localIP := getLocalIP()
-	idleDetector := notify.NewIdleDetector(
-		time.Duration(cfg.Notify.IdleTimeout)*time.Second,
-		func() {
+	idleDetector := notify.NewSmartIdleDetector(
+		time.Duration(cfg.Notify.ShortTimeout)*time.Second,
+		time.Duration(cfg.Notify.LongTimeout)*time.Second,
+		cfg.Notify.Patterns.AwaitingInput,
+		cfg.Notify.Patterns.Processing,
+		func(confidence string) {
 			msg := &notify.NotifyMessage{
 				SessionID:   sess.ID,
 				Command:     sess.Command,
@@ -75,7 +79,11 @@ func runCommand(cmd *cobra.Command, args []string) error {
 				Duration:    sess.Duration().Truncate(time.Second).String(),
 				LastOutput:  string(sess.LastOutput(200)),
 				WebURL:      fmt.Sprintf("http://%s:%d/terminal.html?id=%s", localIP, cfg.Server.Port, sess.ID),
-				IdleSeconds: cfg.Notify.IdleTimeout,
+				IdleSeconds: cfg.Notify.ShortTimeout,
+				Confidence:  confidence,
+			}
+			if confidence == "low" {
+				msg.IdleSeconds = cfg.Notify.LongTimeout
 			}
 			if err := multiNotifier.Send(msg); err != nil {
 				log.Printf("notification error: %v", err)
@@ -94,7 +102,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 				os.Stdout.Write(data)
 				h.Broadcast(data)
 				sess.AppendOutput(data)
-				idleDetector.Reset()
+				idleDetector.Feed(data)
 			}
 			if err != nil {
 				break
