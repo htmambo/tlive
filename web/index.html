@@ -8,13 +8,26 @@
 </head>
 <body>
     <header>
-        <h1>TermLive</h1>
-        <span id="status" class="status-dot online"></span>
+        <div class="header-left">
+            <span class="logo">&#9654;</span>
+            <h1>TermLive</h1>
+        </div>
+        <span id="status" class="status-badge online">
+            <span class="status-dot"></span>
+            <span class="status-text">Connected</span>
+        </span>
     </header>
     <main>
-        <h2>活跃会话</h2>
+        <div class="section-header">
+            <h2>Active Sessions</h2>
+            <span id="session-count" class="count-badge">0</span>
+        </div>
         <div id="sessions" class="session-grid"></div>
-        <p id="empty-msg" style="display:none; color:#888;">暂无活跃会话</p>
+        <div id="empty-msg" class="empty-state" style="display:none;">
+            <div class="empty-icon">&#9881;</div>
+            <p>No active sessions</p>
+            <p class="empty-hint">Run <code>tlive run &lt;command&gt;</code> to start</p>
+        </div>
     </main>
     <script src="/js/app.js"></script>
 </body>
