@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -192,16 +193,18 @@ func (d *Daemon) handleNotify(w http.ResponseWriter, r *http.Request) {
 	// Relay to external notification channels
 	if d.notifier != nil {
 		relayMsg := &notify.NotifyMessage{
-			Command:    string(req.Type),
-			LastOutput: req.Message,
-			Confidence: "high",
-		}
-		if req.Context != "" {
-			relayMsg.LastOutput = req.Message + "\n\n" + req.Context
+			Source:  "cli",
+			Type:    string(req.Type),
+			Message: req.Message,
+			Context: req.Context,
 		}
 		if err := d.notifier.Send(relayMsg); err != nil {
 			log.Printf("notification relay error: %v", err)
+		} else {
+			log.Printf("notification relayed: type=%s", req.Type)
 		}
+	} else {
+		log.Printf("notification stored but no external notifiers configured")
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -256,6 +259,24 @@ func (d *Daemon) handleSessions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// ansiRegex matches ANSI CSI sequences (colors, cursor movement, etc.),
+// OSC sequences (title, hyperlinks), and other common escape codes.
+var ansiRegex = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z@]|\x1b\][^\x07]*\x07|\x1b[()][AB012]|\r`)
+
+// stripANSI removes ANSI escape sequences and control characters from
+// terminal output, leaving only printable text suitable for display in HTML.
+func stripANSI(s string) string {
+	s = ansiRegex.ReplaceAllString(s, "")
+	// Remove remaining non-printable control chars (keep newline/tab)
+	var b strings.Builder
+	for _, r := range s {
+		if r == '\n' || r == '\t' || r >= 32 {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 func (d *Daemon) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	sessions := d.mgr.Store().List()
 	type sessionInfo struct {
@@ -274,7 +295,7 @@ func (d *Daemon) handleListSessions(w http.ResponseWriter, r *http.Request) {
 			Pid:        s.Pid,
 			Status:     string(s.Status),
 			Duration:   s.Duration().Truncate(time.Second).String(),
-			LastOutput: string(s.LastOutput(200)),
+			LastOutput: stripANSI(string(s.LastOutput(200))),
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

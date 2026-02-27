@@ -36,8 +36,14 @@ func TestDaemon_RelaysToNotifiers(t *testing.T) {
 	if len(mock.sent) != 1 {
 		t.Fatalf("expected 1 notification relayed, got %d", len(mock.sent))
 	}
-	if mock.sent[0].LastOutput != "All tests passed" {
-		t.Fatalf("expected message 'All tests passed', got %q", mock.sent[0].LastOutput)
+	if mock.sent[0].Source != "cli" {
+		t.Fatalf("expected source 'cli', got %q", mock.sent[0].Source)
+	}
+	if mock.sent[0].Type != "done" {
+		t.Fatalf("expected type 'done', got %q", mock.sent[0].Type)
+	}
+	if mock.sent[0].Message != "All tests passed" {
+		t.Fatalf("expected message 'All tests passed', got %q", mock.sent[0].Message)
 	}
 }
 

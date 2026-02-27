@@ -4,6 +4,7 @@ package generator
 type GeneratorConfig struct {
 	DaemonPort int    // Port the daemon will listen on
 	Token      string // Auth token (auto-generated if empty)
+	BinaryPath string // Absolute path to the tlive binary (auto-detected if empty)
 }
 
 // Generator is the interface for AI tool-specific file generators.

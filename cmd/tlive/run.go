@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -25,47 +26,43 @@ import (
 	"golang.org/x/term"
 )
 
-var (
-	shortTimeout int
-	longTimeout  int
-	publicIP     string
-)
+var publicIP string
 
 var runCmd = &cobra.Command{
 	Use:   "run <command> [args...]",
 	Short: "Run a command with PTY wrapping and Web UI (full mode)",
-	Long:  "Start a command inside a PTY with remote Web UI, notifications, and idle detection.",
+	Long:  "Start a command inside a PTY with remote Web UI and notifications.",
 	Args:  cobra.MinimumNArgs(1),
 	RunE:  runCommand,
 }
 
 func init() {
-	runCmd.Flags().IntVarP(&shortTimeout, "short-timeout", "s", 30, "Short idle timeout for detected prompts (seconds)")
-	runCmd.Flags().IntVarP(&longTimeout, "long-timeout", "l", 120, "Long idle timeout for unknown idle (seconds)")
 	runCmd.Flags().StringVar(&publicIP, "ip", "", "Override auto-detected LAN IP address")
 }
 
 // localOutputClient implements hub.Client to write PTY output to local
-// stdout and feed the idle detector. It is registered on the session hub
-// so that the SessionManager's output goroutine delivers data here.
+// stdout. It is registered on the session hub so that the SessionManager's
+// output goroutine delivers data here.
 type localOutputClient struct {
-	writer       *os.File
-	idleDetector *notify.SmartIdleDetector
+	writer   *os.File
+	received atomic.Bool
 }
 
 func (c *localOutputClient) Send(data []byte) error {
+	c.received.Store(true)
 	c.writer.Write(data)
-	if c.idleDetector != nil {
-		c.idleDetector.Feed(data)
-	}
 	return nil
 }
 
 func runCommand(cmd *cobra.Command, args []string) error {
-	cfg := config.Default()
-	cfg.Server.Port = port
-	cfg.Notify.ShortTimeout = shortTimeout
-	cfg.Notify.LongTimeout = longTimeout
+	cfg, _ := config.LoadFromFile(".termlive.toml")
+
+	// CLI flags override config values
+	if cmd.Flags().Changed("port") {
+		cfg.Server.Port = port
+	} else if cfg.Daemon.Port != 0 {
+		cfg.Server.Port = cfg.Daemon.Port
+	}
 
 	rows, cols := uint16(24), uint16(80)
 	if w, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
@@ -77,13 +74,23 @@ func runCommand(cmd *cobra.Command, args []string) error {
 	// --- Determine host vs client mode ---
 	isHost := true
 	lock, err := daemon.ReadLockFile(lockPath)
-	if err == nil && daemonHealthCheck(lock.Port, lock.Token) {
-		isHost = false
+	if err == nil {
+		log.Printf("found lock file: port=%d pid=%d", lock.Port, lock.Pid)
+		if daemonHealthCheck(lock.Port, lock.Token) {
+			isHost = false
+			log.Printf("daemon alive, running as client")
+		} else {
+			// Stale lock file from a crashed daemon — remove it
+			log.Printf("daemon not responding, removing stale lock file")
+			daemon.RemoveLockFile(lockPath)
+		}
 	}
 
 	if isHost {
+		log.Printf("starting as host, port=%d", cfg.Server.Port)
 		return runHost(cfg, args, rows, cols, lockPath)
 	}
+	log.Printf("starting as client, daemon port=%d", lock.Port)
 	return runClient(lock, args, rows, cols)
 }
 
@@ -104,7 +111,15 @@ func runHost(cfg *config.Config, args []string, rows, cols uint16, lockPath stri
 	if err != nil {
 		return fmt.Errorf("failed to start command: %w", err)
 	}
+	log.Printf("session created: id=%s cmd=%s pid=%d", ms.Session.ID, ms.Session.Command, ms.Session.Pid)
 	defer mgr.StopSession(ms.Session.ID)
+
+	// Register local output client IMMEDIATELY after session creation to
+	// minimize the window where initial PTY output could be missed.
+	// The idle detector is set later via atomic pointer.
+	localClient := &localOutputClient{writer: os.Stdout}
+	ms.Hub.Register(localClient)
+	defer ms.Hub.Unregister(localClient)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -115,52 +130,16 @@ func runHost(cfg *config.Config, args []string, rows, cols uint16, lockPath stri
 		notifiers = append(notifiers, notify.NewWeChatNotifier(cfg.Notify.WeChat.WebhookURL))
 	}
 	if cfg.Notify.Feishu.WebhookURL != "" {
-		notifiers = append(notifiers, notify.NewFeishuNotifier(cfg.Notify.Feishu.WebhookURL))
+		notifiers = append(notifiers, notify.NewFeishuNotifier(cfg.Notify.Feishu.WebhookURL, cfg.Notify.Feishu.Secret))
 	}
 	multiNotifier := notify.NewMultiNotifier(notifiers...)
 	d.SetNotifiers(multiNotifier)
 
-	// Setup smart idle detector
+	// Setup Web UI server as extra handler on the daemon.
 	localIP := publicIP
 	if localIP == "" {
 		localIP = getLocalIP()
 	}
-	idleDetector := notify.NewSmartIdleDetector(
-		time.Duration(cfg.Notify.ShortTimeout)*time.Second,
-		time.Duration(cfg.Notify.LongTimeout)*time.Second,
-		cfg.Notify.Patterns.AwaitingInput,
-		cfg.Notify.Patterns.Processing,
-		func(confidence string) {
-			msg := &notify.NotifyMessage{
-				SessionID:   ms.Session.ID,
-				Command:     ms.Session.Command,
-				Pid:         ms.Session.Pid,
-				Duration:    ms.Session.Duration().Truncate(time.Second).String(),
-				LastOutput:  string(ms.Session.LastOutput(200)),
-				WebURL:      fmt.Sprintf("http://%s:%d/terminal.html?id=%s", localIP, cfg.Server.Port, ms.Session.ID),
-				IdleSeconds: cfg.Notify.ShortTimeout,
-				Confidence:  confidence,
-			}
-			if confidence == "low" {
-				msg.IdleSeconds = cfg.Notify.LongTimeout
-			}
-			if err := multiNotifier.Send(msg); err != nil {
-				log.Printf("notification error: %v", err)
-			}
-		},
-	)
-	idleDetector.Start()
-
-	// Register local output client on the hub so that PTY output is
-	// written to local stdout and fed to the idle detector.
-	localClient := &localOutputClient{
-		writer:       os.Stdout,
-		idleDetector: idleDetector,
-	}
-	ms.Hub.Register(localClient)
-	defer ms.Hub.Unregister(localClient)
-
-	// Setup Web UI server as extra handler on the daemon.
 	srv := server.New(mgr)
 	mgr.SetResizeFunc(ms.Session.ID, func(r, c uint16) {
 		ms.Proc.Resize(r, c)
@@ -189,6 +168,21 @@ func runHost(cfg *config.Config, args []string, rows, cols uint16, lockPath stri
 	// Set terminal to raw mode for proper input pass-through
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	rawMode := err == nil
+	if !rawMode {
+		fmt.Fprintf(os.Stderr, "  Note: Raw mode unavailable (Git Bash/mintty detected).\n")
+		fmt.Fprintf(os.Stderr, "  For full interactive input, use Windows Terminal, PowerShell, or cmd.exe.\n")
+		fmt.Fprintf(os.Stderr, "  In this mode, press Enter to send input. Web UI is fully interactive.\n\n")
+	}
+
+	// Replay buffered PTY output that may have been broadcast before
+	// localClient was registered on the hub (race between CreateSession's
+	// output goroutine and Register). Wait briefly for ConPTY initial output.
+	time.Sleep(20 * time.Millisecond)
+	if !localClient.received.Load() {
+		if initial := ms.Session.LastOutput(64 * 1024); len(initial) > 0 {
+			os.Stdout.Write(initial)
+		}
+	}
 
 	// Local terminal input -> PTY (exits when ctx cancelled or stdin errors)
 	go func() {
@@ -239,9 +233,6 @@ func runHost(cfg *config.Config, args []string, rows, cols uint16, lockPath stri
 		term.Restore(int(os.Stdin.Fd()), oldState)
 	}
 
-	// Stop idle detector
-	idleDetector.Stop()
-
 	// Check for remaining sessions (from client mode processes).
 	// StopSession is deferred, so other sessions from clients may still be active.
 	// We need to wait for them before shutting down the daemon.
@@ -278,6 +269,10 @@ func runClient(lock daemon.LockInfo, args []string, rows, cols uint16) error {
 	// Set terminal to raw mode
 	oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
 	rawMode := err == nil
+	if !rawMode {
+		fmt.Fprintf(os.Stderr, "  Note: Raw mode unavailable (Git Bash/mintty detected).\n")
+		fmt.Fprintf(os.Stderr, "  For full interactive input, use Windows Terminal, PowerShell, or cmd.exe.\n\n")
+	}
 	defer func() {
 		if rawMode {
 			term.Restore(int(os.Stdin.Fd()), oldState)
@@ -362,7 +357,7 @@ func runClient(lock daemon.LockInfo, args []string, rows, cols uint16) error {
 
 // daemonHealthCheck pings the daemon status endpoint to verify it is alive.
 func daemonHealthCheck(port int, token string) bool {
-	client := &http.Client{Timeout: 2 * time.Second}
+	client := &http.Client{Timeout: 500 * time.Millisecond}
 	url := fmt.Sprintf("http://localhost:%d/api/status", port)
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {

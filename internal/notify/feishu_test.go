@@ -18,7 +18,7 @@ func TestFeishuNotifyHighConfidence(t *testing.T) {
 	}))
 	defer server.Close()
 
-	n := NewFeishuNotifier(server.URL)
+	n := NewFeishuNotifier(server.URL, "")
 	msg := &NotifyMessage{
 		SessionID:   "abc123",
 		Command:     "claude",
@@ -49,6 +49,10 @@ func TestFeishuNotifyHighConfidence(t *testing.T) {
 	if header["template"] != "red" {
 		t.Errorf("high confidence template should be 'red', got %v", header["template"])
 	}
+	// No secret → no timestamp/sign fields
+	if _, ok := receivedBody["timestamp"]; ok {
+		t.Error("should not have timestamp when secret is empty")
+	}
 }
 
 func TestFeishuNotifyLowConfidence(t *testing.T) {
@@ -61,7 +65,7 @@ func TestFeishuNotifyLowConfidence(t *testing.T) {
 	}))
 	defer server.Close()
 
-	n := NewFeishuNotifier(server.URL)
+	n := NewFeishuNotifier(server.URL, "")
 	msg := &NotifyMessage{
 		SessionID:   "abc123",
 		Command:     "claude",
@@ -92,9 +96,70 @@ func TestFeishuNotifyLowConfidence(t *testing.T) {
 }
 
 func TestFeishuNotifyEmptyURL(t *testing.T) {
-	n := NewFeishuNotifier("")
+	n := NewFeishuNotifier("", "")
 	err := n.Send(&NotifyMessage{})
 	if err != nil {
 		t.Error("empty URL should be a no-op, not an error")
+	}
+}
+
+func TestFeishuNotifyWithSignature(t *testing.T) {
+	var receivedBody map[string]interface{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &receivedBody)
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"code":0,"msg":"ok"}`))
+	}))
+	defer server.Close()
+
+	n := NewFeishuNotifier(server.URL, "test-secret-key")
+	msg := &NotifyMessage{
+		SessionID:   "abc123",
+		Command:     "claude",
+		Pid:         12345,
+		Duration:    "5m",
+		LastOutput:  "done",
+		WebURL:      "http://localhost:8080/s/abc123",
+		IdleSeconds: 30,
+		Confidence:  "high",
+	}
+	err := n.Send(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// With secret, timestamp and sign must be present
+	ts, ok := receivedBody["timestamp"]
+	if !ok {
+		t.Fatal("expected timestamp field when secret is set")
+	}
+	if ts == "" {
+		t.Error("timestamp should not be empty")
+	}
+	sign, ok := receivedBody["sign"]
+	if !ok {
+		t.Fatal("expected sign field when secret is set")
+	}
+	if sign == "" {
+		t.Error("sign should not be empty")
+	}
+}
+
+func TestFeishuSign(t *testing.T) {
+	n := NewFeishuNotifier("", "mysecret")
+	sig := n.sign(1700000000)
+	if sig == "" {
+		t.Fatal("signature should not be empty")
+	}
+	// Same input → same output (deterministic)
+	sig2 := n.sign(1700000000)
+	if sig != sig2 {
+		t.Fatal("signature should be deterministic")
+	}
+	// Different timestamp → different signature
+	sig3 := n.sign(1700000001)
+	if sig == sig3 {
+		t.Fatal("different timestamps should produce different signatures")
 	}
 }

@@ -30,6 +30,9 @@ type ManagedSession struct {
 	resizeFn func(rows, cols uint16)
 }
 
+// Done returns a channel that is closed when the process exits.
+func (ms *ManagedSession) Done() <-chan struct{} { return ms.done }
+
 // ExitCode blocks until the managed process exits and returns its exit code.
 func (ms *ManagedSession) ExitCode() int {
 	<-ms.done
@@ -123,6 +126,15 @@ func (m *SessionManager) CreateSession(cmd string, args []string, cfg SessionCon
 	m.managed[sess.ID] = ms
 	m.mu.Unlock()
 
+	// 9. Goroutine: auto-cleanup after process exits
+	go func() {
+		<-ms.done
+		log.Printf("process exited for session %s (code %d), auto-cleaning up", sess.ID, ms.exitCode)
+		// Give clients a moment to receive the exit notification
+		time.Sleep(5 * time.Second)
+		_ = m.StopSession(sess.ID)
+	}()
+
 	return ms, nil
 }
 
@@ -186,8 +198,9 @@ func (m *SessionManager) StopSession(id string) error {
 	// 4. Stop the hub event loop.
 	ms.Hub.Stop()
 
-	// 5. Mark session as stopped.
+	// 5. Mark session as stopped and remove from store.
 	ms.Session.Status = session.StatusStopped
+	m.store.Remove(id)
 
 	return nil
 }

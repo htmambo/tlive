@@ -96,10 +96,10 @@ func TestCreateAndStopSession(t *testing.T) {
 		t.Error("expected GetSession to return false after StopSession")
 	}
 
-	// Verify session still visible in store (for API status reporting)
+	// Verify session removed from store after stop
 	list = mgr.ListSessions()
-	if len(list) != 1 {
-		t.Errorf("expected session to remain in store after stop, got %d sessions", len(list))
+	if len(list) != 0 {
+		t.Errorf("expected session to be removed from store after stop, got %d sessions", len(list))
 	}
 }
 

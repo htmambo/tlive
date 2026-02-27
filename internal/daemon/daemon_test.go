@@ -177,3 +177,27 @@ func TestDaemon_ListSessionsEndpoint(t *testing.T) {
 		t.Errorf("expected command 'echo' in list response, got: %s", respBody)
 	}
 }
+
+func TestStripANSI(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"plain text", "hello world", "hello world"},
+		{"color codes", "\x1b[38;2;153;153;153mhello\x1b[0m", "hello"},
+		{"cursor movement", "\x1b[11;3Hworld", "world"},
+		{"mixed", "\x1b[?25l\x1b[2J\x1b[mhello\r\nworld\x1b[?25h", "hello\nworld"},
+		{"OSC title", "\x1b]0;My Title\x07text", "text"},
+		{"empty", "", ""},
+		{"conpty output", "\x1b[?9001h\x1b[?1004h\x1b[?25l\x1b[2J\x1b[m\x1b[Hhello\r\n", "hello\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := stripANSI(tt.input)
+			if got != tt.want {
+				t.Errorf("stripANSI(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}

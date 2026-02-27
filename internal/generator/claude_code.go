@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // ClaudeCodeGenerator generates skills, rules, hooks, and config
@@ -28,6 +27,12 @@ func NewClaudeCodeGenerator(projectDir string, cfg GeneratorConfig) *ClaudeCodeG
 
 func (g *ClaudeCodeGenerator) Name() string { return "Claude Code" }
 
+// binaryCmd returns the tlive command string for use in generated files.
+// Relies on PATH — tlive init ensures the install dir is in PATH.
+func (g *ClaudeCodeGenerator) binaryCmd() string {
+	return "tlive"
+}
+
 // Generate creates all Claude Code integration files.
 func (g *ClaudeCodeGenerator) Generate() error {
 	steps := []func() error{
@@ -48,8 +53,8 @@ func (g *ClaudeCodeGenerator) Generate() error {
 func (g *ClaudeCodeGenerator) GeneratedFiles() []string {
 	return []string{
 		filepath.Join(".claude", "skills", "termlive-notify", "SKILL.md"),
+		filepath.Join(".claude", "rules", "termlive.md"),
 		filepath.Join(".claude", "settings.local.json"),
-		"CLAUDE.md",
 		".termlive.toml",
 	}
 }
@@ -61,26 +66,47 @@ func (g *ClaudeCodeGenerator) generateSkill() error {
 	}
 	content := `---
 name: termlive-notify
-description: Use when a task completes, needs user confirmation, or you want to report progress to the user
+description: Use when a task completes, needs user confirmation, encounters an error, or you want to report progress to the user
+allowed-tools: Bash(tlive notify *)
 ---
 
 # TermLive Notify
 
-## When to Use
-- Task completed or milestone reached
-- Need user confirmation or decision
-- Encountered an error that requires user attention
-- Long-running task progress update
+Send notifications to the user's TermLive dashboard. They'll get alerted on their phone or browser even when away from the terminal.
 
-## How to Notify
-Run via Bash tool:
+## Usage
+
+` + "```" + `
+tlive notify --type <type> --message "<message>" [--context "<details>"]
+` + "```" + `
+
+Types: done, confirm, error, progress
+
+## Guidelines
+
+Write natural, concise messages. The --type flag handles categorization, so don't prefix messages with "Completed:" or "Error:" etc.
+
+- **done**: Summarize what was accomplished in plain language
+- **error**: Describe what failed and why
+- **confirm**: Explain what decision or input is needed
+- **progress**: Brief status update on long-running work
+
+## Examples
 
 ` + "```bash" + `
-tlive notify --type done --message "Completed: <summary>"
-tlive notify --type confirm --message "Need approval: <details>"
-tlive notify --type error --message "Error: <details>"
-tlive notify --type progress --message "Progress: <details>"
+tlive notify --type done --message "Added JWT auth with refresh tokens" \
+  --context "New files: auth.go, middleware.go. Tests passing."
+
+tlive notify --type error --message "Build fails: missing crypto/ed25519 import" \
+  --context "See internal/auth/keys.go:42"
+
+tlive notify --type confirm --message "Database migration will drop the sessions table — proceed?" \
+  --context "This affects 3 tables. Backup recommended."
+
+tlive notify --type progress --message "Running test suite, 47/120 passed so far"
 ` + "```" + `
+
+The command exits silently if the daemon is not running — it never blocks your workflow.
 `
 	return os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0644)
 }
@@ -92,13 +118,13 @@ func (g *ClaudeCodeGenerator) generateHooks() error {
 	}
 	content := `{
   "hooks": {
-    "PostToolUse": [
+    "Notification": [
       {
-        "matcher": "AskUserQuestion",
+        "matcher": "",
         "hooks": [
           {
             "type": "command",
-            "command": "tlive notify --type confirm --message \"AI is waiting for your input\"",
+            "command": "tlive notify --quiet --type confirm --message \"Claude Code needs your attention\" || true",
             "timeout": 5000
           }
         ]
@@ -109,7 +135,7 @@ func (g *ClaudeCodeGenerator) generateHooks() error {
         "hooks": [
           {
             "type": "command",
-            "command": "tlive notify --type done --message \"Session ended\"",
+            "command": "tlive notify --quiet --type done --message \"Claude Code finished working\" || true",
             "timeout": 5000
           }
         ]
@@ -121,27 +147,18 @@ func (g *ClaudeCodeGenerator) generateHooks() error {
 	return os.WriteFile(filepath.Join(dir, "settings.local.json"), []byte(content), 0644)
 }
 
-const termliveMark = "## TermLive Notification Rules"
-
 func (g *ClaudeCodeGenerator) generateRules() error {
-	path := filepath.Join(g.projectDir, "CLAUDE.md")
-	existing := ""
-	if data, err := os.ReadFile(path); err == nil {
-		existing = string(data)
+	dir := filepath.Join(g.projectDir, ".claude", "rules")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create rules dir: %w", err)
 	}
+	content := `# TermLive Notification Rules
 
-	// Idempotent: skip if already present
-	if strings.Contains(existing, termliveMark) {
-		return nil
-	}
-
-	rules := "\n" + termliveMark + `
 - When you complete a significant task, invoke the termlive-notify skill
 - When you need user confirmation, invoke the termlive-notify skill
 - When you encounter a blocking error, invoke the termlive-notify skill
 `
-	content := existing + rules
-	return os.WriteFile(path, []byte(content), 0644)
+	return os.WriteFile(filepath.Join(dir, "termlive.md"), []byte(content), 0644)
 }
 
 func (g *ClaudeCodeGenerator) generateConfig() error {
@@ -151,16 +168,22 @@ func (g *ClaudeCodeGenerator) generateConfig() error {
 
 [daemon]
 port = %d
+token = "%s"
 auto_start = false
 
 [notify]
 channels = ["web"]
-# wechat_webhook = ""
-# feishu_webhook = ""
+
+# [notify.wechat]
+# webhook_url = ""
+
+# [notify.feishu]
+# webhook_url = ""
+# secret = ""
 
 [notify.options]
 include_context = true
 history_limit = 100
-`, g.cfg.DaemonPort)
+`, g.cfg.DaemonPort, g.cfg.Token)
 	return os.WriteFile(path, []byte(content), 0644)
 }

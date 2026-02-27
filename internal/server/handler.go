@@ -24,21 +24,40 @@ func handleWebSocket(mgr *daemon.SessionManager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/ws/"), "/")
 		sessionID := parts[0]
-		h := mgr.Hub(sessionID)
-		if h == nil {
+		ms, ok := mgr.GetSession(sessionID)
+		if !ok {
 			http.Error(w, "session not found", http.StatusNotFound)
 			return
 		}
+		h := ms.Hub
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
 		client := NewWSClient(conn)
+
+		// Replay buffered output so the browser sees prior ANSI
+		// style/color sequences and existing terminal content.
+		if buf := ms.Session.LastOutput(64 * 1024); len(buf) > 0 {
+			client.Send(buf)
+		}
+
 		h.Register(client)
 		defer func() {
 			h.Unregister(client)
 			client.Close()
 		}()
+
+		// Watch for process exit and notify this client via text frame.
+		go func() {
+			<-ms.Done()
+			exitMsg, _ := json.Marshal(map[string]interface{}{
+				"type": "exit",
+				"code": ms.ExitCode(),
+			})
+			client.SendText(exitMsg)
+		}()
+
 		for {
 			_, msg, err := conn.ReadMessage()
 			if err != nil {

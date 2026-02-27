@@ -15,7 +15,7 @@ const (
 	StatusStopped Status = "stopped"
 )
 
-const outputBufferSize = 4096
+const outputBufferSize = 64 * 1024 // 64 KB — enough to replay ANSI styling on reconnect
 
 type Session struct {
 	ID        string

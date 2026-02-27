@@ -5,14 +5,19 @@ package pty
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/UserExistsError/conpty"
 )
 
 type windowsProcess struct {
-	cpty *conpty.ConPty
-	pid  int
+	cpty     *conpty.ConPty
+	pid      int
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func Start(name string, args []string, rows, cols uint16) (Process, error) {
@@ -52,8 +57,21 @@ func (p *windowsProcess) Wait() (int, error) {
 	return int(exitCode), nil
 }
 
+// Kill forcefully terminates the process and its entire child tree using
+// taskkill /T /F. Safe to call multiple times or on an already-exited process.
+func (p *windowsProcess) Kill() error {
+	// taskkill /T kills the process tree (all children), /F forces termination.
+	// Errors are ignored because the process may have already exited.
+	exec.Command("taskkill", "/T", "/F", "/PID", strconv.Itoa(p.pid)).Run()
+	return nil
+}
+
+// Close releases ConPTY handles. Idempotent — safe to call multiple times.
 func (p *windowsProcess) Close() error {
-	return p.cpty.Close()
+	p.closeOnce.Do(func() {
+		p.closeErr = p.cpty.Close()
+	})
+	return p.closeErr
 }
 
 func (p *windowsProcess) Pid() int {

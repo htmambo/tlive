@@ -12,13 +12,14 @@
     var term = new Terminal({
         cursorBlink: true,
         fontSize: 14,
-        fontFamily: "'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace",
+        fontFamily: "'Cascadia Mono', 'Cascadia Code', 'MesloLGS NF', 'Menlo', 'Consolas', 'DejaVu Sans Mono', monospace",
         theme: {
             background: '#0d1117',
             foreground: '#e6edf3',
             cursor: '#4ecca3',
             selectionBackground: '#264f78',
         },
+        allowProposedApi: true,
     });
 
     var fitAddon = new FitAddon.FitAddon();
@@ -34,6 +35,7 @@
     var wsUrl = wsProtocol + '//' + location.host + '/ws/' + sessionId;
     var ws = null;
     var reconnectTimer = null;
+    var processExited = false;
 
     function setConnected(connected) {
         if (connected) {
@@ -67,13 +69,26 @@
         };
 
         ws.onmessage = function(event) {
-            var data = event.data instanceof ArrayBuffer
-                ? new TextDecoder().decode(event.data)
-                : event.data;
+            // Text frames carry JSON control messages (e.g. exit notification)
+            if (typeof event.data === 'string') {
+                try {
+                    var ctrl = JSON.parse(event.data);
+                    if (ctrl.type === 'exit') {
+                        processExited = true;
+                        showExitOverlay(ctrl.code);
+                        return;
+                    }
+                } catch(e) { /* not JSON, treat as terminal data */ }
+                term.write(event.data);
+                return;
+            }
+            // Binary frames are terminal output
+            var data = new TextDecoder().decode(event.data);
             term.write(data);
         };
 
         ws.onclose = function() {
+            if (processExited) return;
             setConnected(false);
             reconnectTimer = setTimeout(connect, 2000);
         };
@@ -97,6 +112,21 @@
             document.getElementById('session-name').textContent = s.command + ' (PID: ' + s.pid + ') \u00b7 ' + s.duration;
         }
     });
+
+    function showExitOverlay(code) {
+        if (reconnectTimer) clearTimeout(reconnectTimer);
+        statusBadge.className = 'status-badge offline';
+        statusText.textContent = 'Exited';
+        var content = overlay.querySelector('.disconnect-content');
+        content.innerHTML =
+            '<div class="disconnect-icon">&#9209;</div>' +
+            '<p>Process exited (code ' + code + ')</p>' +
+            '<p class="disconnect-hint">Redirecting to dashboard...</p>';
+        overlay.style.display = 'flex';
+        setTimeout(function() {
+            window.location.href = '/?token=' + (new URLSearchParams(window.location.search).get('token') || '');
+        }, 3000);
+    }
 
     connect();
 })();

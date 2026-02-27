@@ -57,6 +57,7 @@ type WeChatConfig struct {
 // FeishuConfig holds Feishu webhook settings.
 type FeishuConfig struct {
 	WebhookURL string `toml:"webhook_url"`
+	Secret     string `toml:"secret"`
 }
 
 // Default returns a Config with sensible defaults.

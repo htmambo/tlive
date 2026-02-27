@@ -21,6 +21,12 @@ func (c *WSClient) Send(data []byte) error {
 	return c.conn.WriteMessage(websocket.BinaryMessage, data)
 }
 
+func (c *WSClient) SendText(data []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.WriteMessage(websocket.TextMessage, data)
+}
+
 func (c *WSClient) Close() error {
 	return c.conn.Close()
 }

@@ -1,6 +1,11 @@
 package notify
 
 type NotifyMessage struct {
+	// Source distinguishes notification origin: "idle" (session idle detection)
+	// or "cli" (manual notification via tlive notify).
+	Source string
+
+	// Fields for idle notifications (Source="idle")
 	SessionID   string
 	Command     string
 	Pid         int
@@ -9,6 +14,11 @@ type NotifyMessage struct {
 	WebURL      string
 	IdleSeconds int
 	Confidence  string // "high" or "low"
+
+	// Fields for CLI notifications (Source="cli")
+	Type    string // done, confirm, error, progress
+	Message string
+	Context string
 }
 
 type Notifier interface {
