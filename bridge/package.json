@@ -20,6 +20,7 @@
     "vitest": "^4.1.0"
   },
   "dependencies": {
+    "discord.js": "^14.25.1",
     "node-telegram-bot-api": "^0.67.0"
   }
 }
