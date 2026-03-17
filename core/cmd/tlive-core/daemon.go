@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/termlive/termlive/core/internal/config"
 	"github.com/termlive/termlive/core/internal/daemon"
-	"github.com/termlive/termlive/core/internal/notify"
 	"github.com/termlive/termlive/core/internal/server"
 	"github.com/termlive/termlive/core/web"
 )
@@ -47,26 +46,9 @@ func runDaemonStart(cmd *cobra.Command, args []string) error {
 	}
 
 	d := daemon.NewDaemon(daemon.DaemonConfig{
-		Port:         daemonPort,
-		Token:        cfg.Daemon.Token,
-		HistoryLimit: cfg.Notify.Options.HistoryLimit,
+		Port:  daemonPort,
+		Token: cfg.Daemon.Token,
 	})
-
-	// Setup external notification channels from config
-	var notifiers []notify.Notifier
-	if cfg.Notify.WeChat.WebhookURL != "" {
-		notifiers = append(notifiers, notify.NewWeChatNotifier(cfg.Notify.WeChat.WebhookURL))
-		log.Printf("daemon: wechat notifier enabled")
-	}
-	if cfg.Notify.Feishu.WebhookURL != "" {
-		notifiers = append(notifiers, notify.NewFeishuNotifier(cfg.Notify.Feishu.WebhookURL, cfg.Notify.Feishu.Secret))
-		log.Printf("daemon: feishu notifier enabled (signed=%v)", cfg.Notify.Feishu.Secret != "")
-	}
-	if len(notifiers) > 0 {
-		d.SetNotifiers(notify.NewMultiNotifier(notifiers...))
-	} else {
-		log.Printf("daemon: no external notifiers configured")
-	}
 
 	// Setup Web UI + WebSocket handler so clients can connect
 	srv := server.New(d.Manager())

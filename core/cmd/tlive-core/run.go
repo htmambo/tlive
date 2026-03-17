@@ -20,7 +20,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/termlive/termlive/core/internal/config"
 	"github.com/termlive/termlive/core/internal/daemon"
-	"github.com/termlive/termlive/core/internal/notify"
 	"github.com/termlive/termlive/core/internal/server"
 	"github.com/termlive/termlive/core/web"
 	"golang.org/x/term"
@@ -99,8 +98,7 @@ func runCommand(cmd *cobra.Command, args []string) error {
 func runHost(cfg *config.Config, args []string, rows, cols uint16, lockPath string) error {
 	// Create daemon
 	d := daemon.NewDaemon(daemon.DaemonConfig{
-		Port:         cfg.Server.Port,
-		HistoryLimit: cfg.Notify.Options.HistoryLimit,
+		Port: cfg.Server.Port,
 	})
 	mgr := d.Manager()
 
@@ -123,17 +121,6 @@ func runHost(cfg *config.Config, args []string, rows, cols uint16, lockPath stri
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-
-	// Setup notifiers
-	var notifiers []notify.Notifier
-	if cfg.Notify.WeChat.WebhookURL != "" {
-		notifiers = append(notifiers, notify.NewWeChatNotifier(cfg.Notify.WeChat.WebhookURL))
-	}
-	if cfg.Notify.Feishu.WebhookURL != "" {
-		notifiers = append(notifiers, notify.NewFeishuNotifier(cfg.Notify.Feishu.WebhookURL, cfg.Notify.Feishu.Secret))
-	}
-	multiNotifier := notify.NewMultiNotifier(notifiers...)
-	d.SetNotifiers(multiNotifier)
 
 	// Setup Web UI server as extra handler on the daemon.
 	localIP := publicIP

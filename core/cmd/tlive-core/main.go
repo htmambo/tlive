@@ -20,9 +20,7 @@ and intelligent notifications via AI tool integration (skills/hooks).`,
 
 func init() {
 	rootCmd.PersistentFlags().IntVarP(&port, "port", "p", 8080, "Web server / daemon port")
-	rootCmd.AddCommand(initCmd)
 	rootCmd.AddCommand(runCmd)
-	rootCmd.AddCommand(notifyCmd)
 	rootCmd.AddCommand(daemonCmd)
 }
 

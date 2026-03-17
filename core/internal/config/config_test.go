@@ -14,12 +14,6 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Server.Host != "0.0.0.0" {
 		t.Errorf("expected default host 0.0.0.0, got %s", cfg.Server.Host)
 	}
-	if cfg.Notify.ShortTimeout != 30 {
-		t.Errorf("expected default short timeout 30, got %d", cfg.Notify.ShortTimeout)
-	}
-	if cfg.Notify.LongTimeout != 120 {
-		t.Errorf("expected default long timeout 120, got %d", cfg.Notify.LongTimeout)
-	}
 }
 
 func TestLoadFromFile(t *testing.T) {
@@ -29,16 +23,6 @@ func TestLoadFromFile(t *testing.T) {
 [server]
 port = 3000
 host = "127.0.0.1"
-
-[notify]
-short_timeout = 15
-long_timeout = 300
-
-[notify.wechat]
-webhook_url = "https://example.com/wechat"
-
-[notify.feishu]
-webhook_url = "https://example.com/feishu"
 `)
 	if err := os.WriteFile(cfgPath, content, 0644); err != nil {
 		t.Fatal(err)
@@ -54,18 +38,6 @@ webhook_url = "https://example.com/feishu"
 	if cfg.Server.Host != "127.0.0.1" {
 		t.Errorf("expected host 127.0.0.1, got %s", cfg.Server.Host)
 	}
-	if cfg.Notify.ShortTimeout != 15 {
-		t.Errorf("expected short timeout 15, got %d", cfg.Notify.ShortTimeout)
-	}
-	if cfg.Notify.LongTimeout != 300 {
-		t.Errorf("expected long timeout 300, got %d", cfg.Notify.LongTimeout)
-	}
-	if cfg.Notify.WeChat.WebhookURL != "https://example.com/wechat" {
-		t.Errorf("unexpected wechat webhook url: %s", cfg.Notify.WeChat.WebhookURL)
-	}
-	if cfg.Notify.Feishu.WebhookURL != "https://example.com/feishu" {
-		t.Errorf("unexpected feishu webhook url: %s", cfg.Notify.Feishu.WebhookURL)
-	}
 }
 
 func TestLoadFromFileMissing(t *testing.T) {
@@ -78,46 +50,6 @@ func TestLoadFromFileMissing(t *testing.T) {
 	}
 }
 
-func TestLoadPatternsFromFile(t *testing.T) {
-	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "config.toml")
-	content := []byte(`
-[notify]
-short_timeout = 10
-long_timeout = 60
-
-[notify.patterns]
-awaiting_input = ["\\$\\s*$", ">>>\\s*$", "mysql>\\s*$"]
-processing = ["^\\s*\\d+%", "ETA\\s+\\d"]
-`)
-	if err := os.WriteFile(cfgPath, content, 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	cfg, err := LoadFromFile(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Notify.ShortTimeout != 10 {
-		t.Errorf("expected short timeout 10, got %d", cfg.Notify.ShortTimeout)
-	}
-	if cfg.Notify.LongTimeout != 60 {
-		t.Errorf("expected long timeout 60, got %d", cfg.Notify.LongTimeout)
-	}
-	if len(cfg.Notify.Patterns.AwaitingInput) != 3 {
-		t.Fatalf("expected 3 awaiting_input patterns, got %d", len(cfg.Notify.Patterns.AwaitingInput))
-	}
-	if cfg.Notify.Patterns.AwaitingInput[0] != "\\$\\s*$" {
-		t.Errorf("unexpected awaiting_input[0]: %s", cfg.Notify.Patterns.AwaitingInput[0])
-	}
-	if len(cfg.Notify.Patterns.Processing) != 2 {
-		t.Fatalf("expected 2 processing patterns, got %d", len(cfg.Notify.Patterns.Processing))
-	}
-	if cfg.Notify.Patterns.Processing[1] != "ETA\\s+\\d" {
-		t.Errorf("unexpected processing[1]: %s", cfg.Notify.Patterns.Processing[1])
-	}
-}
-
 func TestLoadFromFile_WithDaemonConfig(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".termlive.toml")
@@ -125,17 +57,6 @@ func TestLoadFromFile_WithDaemonConfig(t *testing.T) {
 [daemon]
 port = 9090
 token = "my-token"
-
-[notify]
-channels = ["web", "wechat"]
-short_timeout = 15
-
-[notify.options]
-include_context = false
-history_limit = 50
-
-[notify.wechat]
-webhook_url = "https://example.com/hook"
 `
 	os.WriteFile(path, []byte(content), 0644)
 
@@ -149,26 +70,11 @@ webhook_url = "https://example.com/hook"
 	if cfg.Daemon.Token != "my-token" {
 		t.Fatalf("expected token 'my-token', got %q", cfg.Daemon.Token)
 	}
-	if len(cfg.Notify.Channels) != 2 {
-		t.Fatalf("expected 2 channels, got %d", len(cfg.Notify.Channels))
-	}
-	if cfg.Notify.Options.HistoryLimit != 50 {
-		t.Fatalf("expected history_limit 50, got %d", cfg.Notify.Options.HistoryLimit)
-	}
-	if cfg.Notify.Options.IncludeContext != false {
-		t.Fatal("expected include_context false")
-	}
 }
 
 func TestDefault_HasSaneDefaults(t *testing.T) {
 	cfg := Default()
 	if cfg.Daemon.Port != 8080 {
 		t.Fatalf("expected default daemon port 8080, got %d", cfg.Daemon.Port)
-	}
-	if cfg.Notify.Options.HistoryLimit != 100 {
-		t.Fatalf("expected default history_limit 100, got %d", cfg.Notify.Options.HistoryLimit)
-	}
-	if cfg.Notify.Options.IncludeContext != true {
-		t.Fatal("expected default include_context true")
 	}
 }
