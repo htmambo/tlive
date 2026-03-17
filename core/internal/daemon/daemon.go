@@ -28,6 +28,7 @@ type Daemon struct {
 	mgr           *SessionManager
 	notifications *NotificationStore
 	bridge        *BridgeManager
+	stats         *Stats
 	token         string
 	startTime     time.Time
 	server        *http.Server
@@ -52,6 +53,7 @@ func NewDaemon(cfg DaemonConfig) *Daemon {
 		mgr:           NewSessionManager(),
 		notifications: NewNotificationStore(historyLimit),
 		bridge:        NewBridgeManager(),
+		stats:         NewStats(),
 		token:         token,
 		startTime:     time.Now(),
 	}
@@ -115,6 +117,7 @@ func (d *Daemon) Handler() http.Handler {
 	mux.HandleFunc("/api/bridge/register", d.handleBridgeRegister)
 	mux.HandleFunc("/api/bridge/heartbeat", d.handleBridgeHeartbeat)
 	mux.HandleFunc("/api/bridge/status", d.handleBridgeStatus)
+	mux.HandleFunc("/api/stats", d.handleStats)
 	if d.extraHandler != nil {
 		mux.Handle("/", d.extraHandler)
 	}
@@ -314,6 +317,34 @@ func (d *Daemon) handleBridgeStatus(w http.ResponseWriter, r *http.Request) {
 	status := d.bridge.Status()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(status)
+}
+
+// --- Stats API handlers ---
+
+// StatsAddRequest is the JSON body for POST /api/stats.
+type StatsAddRequest struct {
+	InputTokens  int64   `json:"input_tokens"`
+	OutputTokens int64   `json:"output_tokens"`
+	CostUSD      float64 `json:"cost_usd"`
+}
+
+func (d *Daemon) handleStats(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodPost:
+		var req StatsAddRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		d.stats.Add(req.InputTokens, req.OutputTokens, req.CostUSD)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	case http.MethodGet:
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(d.stats.Get())
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 // --- Auth middleware ---
