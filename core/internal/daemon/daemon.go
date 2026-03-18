@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"regexp"
@@ -28,6 +29,7 @@ type Daemon struct {
 	cfg           DaemonConfig
 	mgr           *SessionManager
 	notifications *NotificationStore
+	hooks         *HookManager
 	token         string
 	host          string
 	startTime     time.Time
@@ -56,6 +58,7 @@ func NewDaemon(cfg DaemonConfig) *Daemon {
 		cfg:           cfg,
 		mgr:           NewSessionManager(),
 		notifications: NewNotificationStore(historyLimit),
+		hooks:         NewHookManager(),
 		token:         token,
 		host:          host,
 		startTime:     time.Now(),
@@ -118,6 +121,10 @@ func (d *Daemon) Handler() http.Handler {
 	mux.HandleFunc("/api/status", d.handleStatus)
 	mux.HandleFunc("/api/sessions/", d.handleDeleteSession)
 	mux.HandleFunc("/api/sessions", d.handleSessions)
+	mux.HandleFunc("/api/hooks/permission/", d.handleHookPermissionResolve)
+	mux.HandleFunc("/api/hooks/permission", d.handleHookPermission)
+	mux.HandleFunc("/api/hooks/pending", d.handleHooksPending)
+	mux.HandleFunc("/api/hooks/notify", d.handleHookNotify)
 	if d.extraHandler != nil {
 		mux.Handle("/", d.extraHandler)
 	}
@@ -294,6 +301,96 @@ func (d *Daemon) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(DeleteSessionResponse{OK: true})
+}
+
+// --- Hooks handlers ---
+
+// handleHookPermission handles POST /api/hooks/permission — receives Claude Code hook JSON,
+// creates a pending request, and long-polls until resolved or timeout.
+func (d *Daemon) handleHookPermission(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	rawBody, _ := io.ReadAll(r.Body)
+
+	var body struct {
+		ToolName string          `json:"tool_name"`
+		Input    json.RawMessage `json:"tool_input"`
+	}
+	json.Unmarshal(rawBody, &body)
+
+	// If tool_name is empty, try to extract from the raw hook data
+	if body.ToolName == "" {
+		var hookData map[string]interface{}
+		json.Unmarshal(rawBody, &hookData)
+		if tn, ok := hookData["tool_name"].(string); ok {
+			body.ToolName = tn
+		}
+	}
+
+	req := d.hooks.AddPermission(body.ToolName, body.Input)
+
+	// Long-poll: block until resolved or timeout
+	decision := d.hooks.WaitForResolution(req)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"decision": decision})
+}
+
+// handleHookPermissionResolve handles POST /api/hooks/permission/:id/resolve
+func (d *Daemon) handleHookPermissionResolve(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse ID from path: /api/hooks/permission/:id/resolve
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/hooks/permission/"), "/")
+	if len(parts) < 2 || parts[1] != "resolve" {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	id := parts[0]
+
+	var body struct {
+		Decision string `json:"decision"`
+	}
+	json.NewDecoder(r.Body).Decode(&body)
+	if body.Decision != "allow" && body.Decision != "deny" {
+		body.Decision = "deny"
+	}
+
+	ok := d.hooks.Resolve(id, body.Decision)
+	if !ok {
+		http.Error(w, "permission not found or already resolved", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "resolved"})
+}
+
+// handleHooksPending handles GET /api/hooks/pending — returns list of pending permissions.
+func (d *Daemon) handleHooksPending(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	pending := d.hooks.ListPending()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(pending)
+}
+
+// handleHookNotify handles POST /api/hooks/notify — receives notification, stores for Bridge polling.
+func (d *Daemon) handleHookNotify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	rawBody, _ := io.ReadAll(r.Body)
+	d.notifications.Add(NotifyProgress, string(rawBody), "")
+	w.WriteHeader(http.StatusOK)
 }
 
 // --- Auth middleware ---

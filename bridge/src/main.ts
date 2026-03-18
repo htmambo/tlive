@@ -15,6 +15,9 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 let coreAvailable = false;
 let coreClient: CoreClientImpl | null = null;
 
+// Track hook permission IDs already sent to IM (avoid duplicates across polls)
+const sentPermissionIds = new Set<string>();
+
 export function isCoreAvailable(): boolean {
   return coreAvailable;
 }
@@ -74,8 +77,10 @@ async function main() {
         signal: AbortSignal.timeout(3000),
       });
       coreAvailable = resp.ok;
+      manager.setCoreAvailable(coreAvailable);
     } catch {
       coreAvailable = false;
+      manager.setCoreAvailable(false);
     }
   }, 30_000);
 
@@ -94,6 +99,7 @@ async function main() {
 
   // Start Bridge Manager with enabled IM adapters
   const manager = new BridgeManager();
+  manager.setCoreAvailable(coreAvailable);
 
   for (const channelType of config.enabledChannels) {
     try {
@@ -113,9 +119,63 @@ async function main() {
     logger.info(`Web terminal available at ${webUrl}`);
   }
 
+  // Poll Go Core for pending hook permissions (if Core is available)
+  const hookPollInterval = setInterval(async () => {
+    if (!coreAvailable) return;
+    try {
+      const resp = await fetch(`${config.coreUrl}/api/hooks/pending`, {
+        headers: { Authorization: `Bearer ${config.token}` },
+        signal: AbortSignal.timeout(3000),
+      });
+      if (!resp.ok) return;
+      const pending = await resp.json() as Array<{
+        id: string;
+        tool_name: string;
+        input: unknown;
+        created_at: string;
+      }>;
+
+      for (const perm of pending) {
+        // Check if we already sent this permission to IM (avoid duplicates)
+        if (sentPermissionIds.has(perm.id)) continue;
+        sentPermissionIds.add(perm.id);
+
+        // Format tool info for IM display
+        const inputStr = typeof perm.input === 'string'
+          ? perm.input
+          : JSON.stringify(perm.input, null, 2);
+        const truncatedInput = inputStr.length > 500 ? inputStr.slice(0, 497) + '...' : inputStr;
+
+        const text = `🔒 Permission Required (Local Claude Code)\n\nTool: \`${perm.tool_name}\`\n\`\`\`\n${truncatedInput}\n\`\`\`\n\n⏱ Expires in 5 minutes`;
+
+        // Send to all active IM adapters with Allow/Deny buttons
+        for (const adapter of manager.getAdapters()) {
+          const chatId = config.telegram.chatId;
+          if (!chatId) continue;
+
+          try {
+            await adapter.send({
+              chatId,
+              text,
+              buttons: [
+                { label: '✅ Allow', callbackData: `hook:allow:${perm.id}`, style: 'primary' },
+                { label: '❌ Deny', callbackData: `hook:deny:${perm.id}`, style: 'danger' },
+              ],
+            });
+          } catch (err) {
+            logger.warn(`Failed to send permission to ${adapter.channelType}: ${err}`);
+          }
+        }
+      }
+    } catch {
+      // Polling failure is non-fatal
+    }
+  }, 2000);
+
   // Graceful shutdown
   const shutdown = async (reason = 'signal') => {
     logger.info('Shutting down...');
+    clearInterval(hookPollInterval);
     writeStatusFile(tliveHome, {
       pid: process.pid,
       exitedAt: new Date().toISOString(),

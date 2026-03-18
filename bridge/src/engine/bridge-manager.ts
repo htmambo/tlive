@@ -16,10 +16,25 @@ export class BridgeManager {
   private delivery = new DeliveryLayer();
   private gateway = new PendingPermissions();
   private broker: PermissionBroker;
+  private coreUrl: string;
+  private token: string;
+  private coreAvailable = false;
 
   constructor() {
     const config = loadConfig();
     this.broker = new PermissionBroker(this.gateway, config.publicUrl);
+    this.coreUrl = config.coreUrl;
+    this.token = config.token;
+  }
+
+  /** Expose coreAvailable flag for main.ts polling loop */
+  setCoreAvailable(available: boolean): void {
+    this.coreAvailable = available;
+  }
+
+  /** Returns all active adapters */
+  getAdapters(): BaseChannelAdapter[] {
+    return Array.from(this.adapters.values());
   }
 
   registerAdapter(adapter: BaseChannelAdapter): void {
@@ -61,8 +76,39 @@ export class BridgeManager {
     // Auth check
     if (!adapter.isAuthorized(msg.userId, msg.chatId)) return false;
 
-    // Callback data → permission broker
+    // Callback data
     if (msg.callbackData) {
+      // Hook permission callbacks (hook:allow:ID or hook:deny:ID)
+      if (msg.callbackData.startsWith('hook:')) {
+        const parts = msg.callbackData.split(':');
+        const decision = parts[1]; // allow or deny
+        const hookId = parts[2];
+
+        if (this.coreAvailable) {
+          try {
+            await fetch(`${this.coreUrl}/api/hooks/permission/${hookId}/resolve`, {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${this.token}`,
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ decision }),
+              signal: AbortSignal.timeout(5000),
+            });
+            await adapter.send({
+              chatId: msg.chatId,
+              text: decision === 'allow' ? '✅ Allowed' : '❌ Denied',
+            });
+          } catch (err) {
+            await adapter.send({ chatId: msg.chatId, text: `❌ Failed to resolve: ${err}` });
+          }
+        } else {
+          await adapter.send({ chatId: msg.chatId, text: '❌ Go Core not available' });
+        }
+        return true;
+      }
+
+      // Regular permission broker callbacks
       this.broker.handlePermissionCallback(msg.callbackData);
       return true;
     }
