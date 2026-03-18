@@ -27,18 +27,6 @@ import (
 
 var publicIP string
 
-var runCmd = &cobra.Command{
-	Use:   "run <command> [args...]",
-	Short: "Run a command with PTY wrapping and Web UI (full mode)",
-	Long:  "Start a command inside a PTY with remote Web UI and notifications.",
-	Args:  cobra.MinimumNArgs(1),
-	RunE:  runCommand,
-}
-
-func init() {
-	runCmd.Flags().StringVar(&publicIP, "ip", "", "Override auto-detected LAN IP address")
-}
-
 // localOutputClient implements hub.Client to write PTY output to local
 // stdout. It is registered on the session hub so that the SessionManager's
 // output goroutine delivers data here.
@@ -54,7 +42,11 @@ func (c *localOutputClient) Send(data []byte) error {
 }
 
 func runCommand(cmd *cobra.Command, args []string) error {
-	cfg, _ := config.LoadFromFile(".termlive.toml")
+	if len(args) == 0 {
+		return cmd.Help()
+	}
+
+	cfg, _ := config.LoadFromFile(".tlive.toml")
 
 	// CLI flags override config values
 	if cmd.Flags().Changed("port") {
@@ -114,7 +106,6 @@ func runHost(cfg *config.Config, args []string, rows, cols uint16, lockPath stri
 
 	// Register local output client IMMEDIATELY after session creation to
 	// minimize the window where initial PTY output could be missed.
-	// The idle detector is set later via atomic pointer.
 	localClient := &localOutputClient{writer: os.Stdout}
 	ms.Hub.Register(localClient)
 	defer ms.Hub.Unregister(localClient)
@@ -145,7 +136,7 @@ func runHost(cfg *config.Config, args []string, rows, cols uint16, lockPath stri
 	// Print connection info
 	url := fmt.Sprintf("http://%s:%d?token=%s", localIP, cfg.Server.Port, d.Token())
 	localURL := fmt.Sprintf("http://localhost:%d?token=%s", cfg.Server.Port, d.Token())
-	fmt.Fprintf(os.Stderr, "\n  TermLive Web UI:\n")
+	fmt.Fprintf(os.Stderr, "\n  TLive Web UI:\n")
 	fmt.Fprintf(os.Stderr, "    Local:   %s\n", localURL)
 	fmt.Fprintf(os.Stderr, "    Network: %s\n", url)
 	fmt.Fprintf(os.Stderr, "  Session: %s (ID: %s)\n\n", ms.Session.Command, ms.Session.ID)
@@ -192,6 +183,9 @@ func runHost(cfg *config.Config, args []string, rows, cols uint16, lockPath stri
 
 	// Start daemon in goroutine
 	go d.Run()
+
+	// Start idle watcher — auto-shuts down after 15 min idle
+	d.StartIdleWatcher()
 
 	// Wait for process exit or signal
 	sigCh := make(chan os.Signal, 1)
@@ -249,7 +243,7 @@ func runClient(lock daemon.LockInfo, args []string, rows, cols uint16) error {
 	}
 	defer deleteSessionViaAPI(lock.Port, lock.Token, sessionID)
 
-	fmt.Fprintf(os.Stderr, "\n  TermLive (client mode):\n")
+	fmt.Fprintf(os.Stderr, "\n  TLive (client mode):\n")
 	fmt.Fprintf(os.Stderr, "    Daemon:  http://localhost:%d\n", lock.Port)
 	fmt.Fprintf(os.Stderr, "    Session: %s (ID: %s)\n\n", args[0], sessionID)
 

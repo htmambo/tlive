@@ -14,10 +14,10 @@ type LockInfo struct {
 	Pid   int    `json:"pid"`
 }
 
-// DefaultLockPath returns ~/.termlive/daemon.json.
+// DefaultLockPath returns ~/.tlive/daemon.json.
 func DefaultLockPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".termlive", "daemon.json")
+	return filepath.Join(home, ".tlive", "daemon.json")
 }
 
 // WriteLockFile atomically writes lock info, creating parent dirs as needed.

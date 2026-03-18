@@ -20,6 +20,7 @@ import (
 type DaemonConfig struct {
 	Port         int
 	Token        string
+	Host         string // default "127.0.0.1"
 	HistoryLimit int
 }
 
@@ -33,6 +34,7 @@ type Daemon struct {
 	stats         *Stats
 	tokens        *TokenStore
 	token         string
+	host          string
 	startTime     time.Time
 	server        *http.Server
 	extraHandler  http.Handler
@@ -51,6 +53,10 @@ func NewDaemon(cfg DaemonConfig) *Daemon {
 	if historyLimit <= 0 {
 		historyLimit = 100
 	}
+	host := cfg.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
 	return &Daemon{
 		cfg:           cfg,
 		mgr:           NewSessionManager(),
@@ -59,6 +65,7 @@ func NewDaemon(cfg DaemonConfig) *Daemon {
 		stats:         NewStats(),
 		tokens:        NewTokenStore(),
 		token:         token,
+		host:          host,
 		startTime:     time.Now(),
 	}
 }
@@ -136,11 +143,11 @@ func (d *Daemon) Handler() http.Handler {
 
 // Run starts the HTTP server and blocks until Stop is called.
 func (d *Daemon) Run() error {
-	addr := fmt.Sprintf(":%d", d.cfg.Port)
+	addr := fmt.Sprintf("%s:%d", d.host, d.cfg.Port)
 	d.mu.Lock()
 	d.server = &http.Server{Addr: addr, Handler: d.Handler()}
 	d.mu.Unlock()
-	log.Printf("TermLive daemon listening on %s", addr)
+	log.Printf("TLive daemon listening on %s", addr)
 	if err := d.server.ListenAndServe(); err != http.ErrServerClosed {
 		return err
 	}
@@ -158,6 +165,29 @@ func (d *Daemon) Stop() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return srv.Shutdown(ctx)
+}
+
+// StartIdleWatcher starts a background goroutine that auto-shuts down the
+// daemon after 15 minutes of inactivity (no active sessions).
+func (d *Daemon) StartIdleWatcher() {
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		var idleSince time.Time
+		for range ticker.C {
+			if d.mgr.ActiveCount() == 0 {
+				if idleSince.IsZero() {
+					idleSince = time.Now()
+				} else if time.Since(idleSince) > 15*time.Minute {
+					log.Println("Daemon idle for 15 minutes, auto-shutting down")
+					d.Stop()
+					return
+				}
+			} else {
+				idleSince = time.Time{} // reset
+			}
+		}
+	}()
 }
 
 // --- Handlers ---

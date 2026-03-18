@@ -52,7 +52,7 @@ func TestLoadFromFileMissing(t *testing.T) {
 
 func TestLoadFromFile_WithDaemonConfig(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, ".termlive.toml")
+	path := filepath.Join(dir, ".tlive.toml")
 	content := `
 [daemon]
 port = 9090
