@@ -8,7 +8,7 @@ import { homedir } from 'node:os';
 import { createInterface } from 'node:readline';
 import { randomBytes } from 'node:crypto';
 
-const TERMLIVE_HOME = join(homedir(), '.termlive');
+const TERMLIVE_HOME = join(homedir(), '.tlive');
 const CONFIG_PATH = join(TERMLIVE_HOME, 'config.env');
 
 export function isClaudeCodeEnvironment(): boolean {
