@@ -111,12 +111,13 @@ tlive stop                 # Stop Go daemon (kills all sessions)
 ```
 GET    /api/status                # Daemon status, version
 GET    /api/sessions              # List active PTY sessions
-POST   /api/sessions/:id/input   # Write to PTY stdin (for remote input)
-WS     /ws/session/:id           # Terminal WebSocket stream
+WS     /ws/session/:id           # Terminal WebSocket stream (bidirectional: output + input)
 WS     /ws/status                # Status updates stream
 GET    /                          # Web UI dashboard
 GET    /terminal.html?id=xxx      # Web terminal page
 ```
+
+No REST endpoint for PTY stdin. Terminal input flows exclusively through the WebSocket connection (`/ws/session/:id`) — the same channel used by xterm.js in the browser. This keeps Go Core as a pure terminal server with zero IM/Bridge coupling.
 
 Auth: Bearer token via header, cookie (`tl_token`), or `?token=` query param. Token auto-generated on first run, stored in `~/.tlive/config.env`.
 
@@ -133,6 +134,7 @@ Auth: Bearer token via header, cookie (`tl_token`), or `?token=` query param. To
 - No hooks injection
 - No Agent SDK
 - No Node.js dependency
+- No REST stdin input — terminal I/O is WebSocket only
 
 ### What Changes From Current Code
 
@@ -152,17 +154,6 @@ Auth: Bearer token via header, cookie (`tl_token`), or `?token=` query param. To
 | `init` subcommand | Replace with `install skills` |
 | Idle detection / OutputClassifier | Remove |
 | Webhook notification code | Remove |
-
-### New: `POST /api/sessions/:id/input`
-
-Write data to a session's PTY stdin. Used by Bridge to forward IM messages as terminal input.
-
-```
-POST /api/sessions/:id/input
-Authorization: Bearer <token>
-Content-Type: application/octet-stream
-Body: raw bytes to write to PTY stdin
-```
 
 ### New: `tlive install skills`
 
@@ -421,9 +412,8 @@ TL: web:on | 2 sessions                       # Go daemon only
 6. Default bind `127.0.0.1` (configurable via TL_HOST)
 7. Add: daemon idle auto-shutdown (15 min with 0 sessions)
 8. Add: `tlive stop` command
-9. Add: `POST /api/sessions/:id/input` endpoint
-10. Add: `tlive setup` command (interactive config, writes unified config.env)
-11. Add: `tlive install skills` command (with Node.js pre-check)
+9. Add: `tlive setup` command (interactive config, writes unified config.env)
+10. Add: `tlive install skills` command (symlink to npm package)
 
 ### Phase 2: Bridge Simplification
 1. Make Core connection optional (graceful degradation)
