@@ -1,28 +1,44 @@
-export class PendingPermissions {
-  private pending = new Map<string, { resolve: (allowed: boolean) => void; timer: NodeJS.Timeout }>();
+export interface PermissionResult {
+  behavior: 'allow' | 'deny';
+  message?: string;
+}
 
-  waitFor(toolUseId: string, timeoutMs = 300_000): Promise<boolean> {
-    return new Promise<boolean>((resolve) => {
+export class PendingPermissions {
+  private pending = new Map<string, {
+    resolve: (r: PermissionResult) => void;
+    timer: NodeJS.Timeout;
+  }>();
+  private timeoutMs = 5 * 60 * 1000; // 5 minutes
+
+  waitFor(toolUseId: string): Promise<PermissionResult> {
+    return new Promise((resolve) => {
       const timer = setTimeout(() => {
-        this.resolve(toolUseId, false);
-      }, timeoutMs);
+        this.pending.delete(toolUseId);
+        resolve({ behavior: 'deny', message: 'Permission request timed out' });
+      }, this.timeoutMs);
       this.pending.set(toolUseId, { resolve, timer });
     });
   }
 
-  resolve(toolUseId: string, allowed: boolean): boolean {
-    const entry = this.pending.get(toolUseId);
+  resolve(permissionRequestId: string, allowed: boolean, message?: string): boolean {
+    const entry = this.pending.get(permissionRequestId);
     if (!entry) return false;
     clearTimeout(entry.timer);
-    entry.resolve(allowed);
-    this.pending.delete(toolUseId);
+    if (allowed) {
+      entry.resolve({ behavior: 'allow' });
+    } else {
+      entry.resolve({ behavior: 'deny', message: message || 'Denied by user' });
+    }
+    this.pending.delete(permissionRequestId);
     return true;
   }
 
   denyAll(): void {
-    for (const [id] of this.pending) {
-      this.resolve(id, false);
+    for (const [, entry] of this.pending) {
+      clearTimeout(entry.timer);
+      entry.resolve({ behavior: 'deny', message: 'Bridge shutting down' });
     }
+    this.pending.clear();
   }
 
   pendingCount(): number {

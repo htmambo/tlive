@@ -27,13 +27,13 @@ export class BridgeManager {
   }
 
   async start(): Promise<void> {
+    this.running = true;
     for (const [type, adapter] of this.adapters) {
       const err = adapter.validateConfig();
       if (err) { console.warn(`Skipping ${type}: ${err}`); this.adapters.delete(type); continue; }
       await adapter.start();
       this.runAdapterLoop(adapter);
     }
-    this.running = true;
   }
 
   async stop(): Promise<void> {
@@ -48,10 +48,11 @@ export class BridgeManager {
     while (this.running) {
       const msg = await adapter.consumeOne();
       if (!msg) { await new Promise(r => setTimeout(r, 100)); continue; }
+      console.log(`[${adapter.channelType}] Message from ${msg.userId}: ${msg.text || '(callback)'}`);
       try {
         await this.handleInboundMessage(adapter, msg);
       } catch (err) {
-        console.error(`Error handling message:`, err);
+        console.error(`[${adapter.channelType}] Error handling message:`, err);
       }
     }
   }
@@ -85,11 +86,16 @@ export class BridgeManager {
       },
     });
 
-    // Deliver response
-    const platformLimits: Record<string, number> = { telegram: 4096, discord: 2000, feishu: 30000 };
-    await this.delivery.deliver(adapter, msg.chatId, result.text, {
-      platformLimit: platformLimits[adapter.channelType] ?? 4096,
-    });
+    // Deliver response (skip if empty)
+    const responseText = result.text.trim();
+    if (responseText) {
+      const platformLimits: Record<string, number> = { telegram: 4096, discord: 2000, feishu: 30000 };
+      await this.delivery.deliver(adapter, msg.chatId, responseText, {
+        platformLimit: platformLimits[adapter.channelType] ?? 4096,
+      });
+    } else {
+      await adapter.send({ chatId: msg.chatId, text: '(no response)' });
+    }
 
     return true;
   }

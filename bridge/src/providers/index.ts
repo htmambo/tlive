@@ -1,7 +1,8 @@
-import { ClaudeSDKProvider, type PermissionHandler } from './claude-sdk.js';
+import { ClaudeSDKProvider } from './claude-sdk.js';
 import type { LLMProvider } from './base.js';
+import type { PendingPermissions } from '../permissions/gateway.js';
 
-export function resolveProvider(runtime: string, permissions: PermissionHandler): LLMProvider {
+export function resolveProvider(runtime: string, permissions: PendingPermissions): LLMProvider {
   switch (runtime) {
     case 'claude':
     case 'auto':
@@ -13,4 +14,3 @@ export function resolveProvider(runtime: string, permissions: PermissionHandler)
 
 export { ClaudeSDKProvider } from './claude-sdk.js';
 export type { LLMProvider, StreamChatParams } from './base.js';
-export type { PermissionHandler } from './claude-sdk.js';
