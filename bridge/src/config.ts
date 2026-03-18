@@ -57,6 +57,11 @@ function loadEnvFile(path: string): Record<string, string> {
   }
 }
 
+export function maskSecret(value: string): string {
+  if (!value || value.length <= 4) return '****';
+  return '*'.repeat(value.length - 4) + value.slice(-4);
+}
+
 export function loadConfig(): Config {
   // 1. Load env file
   const envFile = loadEnvFile(join(homedir(), '.tlive', 'config.env'));

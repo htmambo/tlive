@@ -9,6 +9,7 @@ import { BridgeManager } from './engine/bridge-manager.js';
 import { createAdapter } from './channels/index.js';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
+import { mkdirSync, writeFileSync } from 'node:fs';
 
 // Whether Go Core daemon is reachable (for web terminal links in IM)
 let coreAvailable = false;
@@ -23,6 +24,16 @@ export function getCoreUrl(): string {
   return config.publicUrl || config.coreUrl;
 }
 
+function writeStatusFile(tliveHome: string, data: Record<string, unknown>): void {
+  try {
+    const runtimeDir = join(tliveHome, 'runtime');
+    mkdirSync(runtimeDir, { recursive: true });
+    writeFileSync(join(runtimeDir, 'status.json'), JSON.stringify(data, null, 2));
+  } catch {
+    // Non-fatal — don't block startup
+  }
+}
+
 async function main() {
   const config = loadConfig();
   const tliveHome = join(homedir(), '.tlive');
@@ -34,6 +45,14 @@ async function main() {
 
   logger.info('TLive Bridge starting...');
   logger.info(`Enabled channels: ${config.enabledChannels.join(', ') || 'none'}`);
+
+  // Write startup status
+  writeStatusFile(tliveHome, {
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    channels: config.enabledChannels,
+    version: '0.1.0',
+  });
 
   // Try connecting to Go Core daemon (optional — Bridge works without it)
   coreClient = new CoreClientImpl(config.coreUrl, config.token);
@@ -95,8 +114,13 @@ async function main() {
   }
 
   // Graceful shutdown
-  const shutdown = async () => {
+  const shutdown = async (reason = 'signal') => {
     logger.info('Shutting down...');
+    writeStatusFile(tliveHome, {
+      pid: process.pid,
+      exitedAt: new Date().toISOString(),
+      exitReason: reason,
+    });
     await manager.stop();
     permissions.denyAll();
     if (coreClient) await coreClient.disconnect();
@@ -104,8 +128,8 @@ async function main() {
     process.exit(0);
   };
 
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
 
   // Keep process alive
   setInterval(() => {}, 60_000);

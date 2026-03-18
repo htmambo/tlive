@@ -55,10 +55,8 @@ export class ConversationEngine {
         const { done, value } = await reader.read();
         if (done) break;
 
-        console.log(`[conversation] raw value: ${value.slice(0, 120)}`);
         const event = parseSSE(value);
-        if (!event) { console.log('[conversation] parseSSE returned null'); continue; }
-        console.log(`[conversation] event type=${event.type} data=${JSON.stringify(event.data).slice(0, 80)}`);
+        if (!event) continue;
 
         switch (event.type) {
           case 'text':
