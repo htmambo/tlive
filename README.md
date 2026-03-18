@@ -1,244 +1,268 @@
 # TermLive
 
-Terminal live monitoring with Web UI, smart notifications, and AI tool integration.
+AI coding tool remote control platform — monitor terminal sessions, approve tool permissions, and interact with Claude Code from your phone via Telegram, Discord, or Feishu.
 
-TermLive wraps any terminal command in a PTY, provides a real-time Web terminal you can access from your phone or another device, and sends notifications (WeChat, Feishu, Web) when your long-running tasks finish or need attention.
+## What is TermLive?
+
+TermLive bridges your AI coding sessions to instant messaging platforms. Run Claude Code on your server, get real-time streaming responses on your phone, approve tool permissions with one tap, and view live terminal output in the browser.
+
+**Without TermLive:** You stare at a terminal waiting for Claude Code to finish.
+
+**With TermLive:** You walk away. Your phone buzzes when Claude needs approval or finishes work.
 
 ## Features
 
-- **Web Terminal** — access your terminal session from any browser, including mobile
-- **Multi-session** — run multiple `tlive run` commands, all visible in one dashboard
-- **Smart idle detection** — detects when a command is waiting for input vs. still processing
-- **Notification channels** — WeChat Work, Feishu (Lark), Web dashboard
-- **AI tool integration** — Claude Code skills + hooks out of the box
-- **Cross-platform** — Linux, macOS, Windows (ConPTY)
-- **Single binary** — Web UI is embedded, no external dependencies
+- **Bidirectional IM** — chat with Claude Code from Telegram, Discord, or Feishu
+- **Tool Permission Approval** — approve/deny file edits, command execution from IM buttons
+- **Web Terminal** — real-time terminal access from any browser, including mobile
+- **Multi-session Dashboard** — manage multiple terminal sessions in one view
+- **Streaming Responses** — see Claude's output as it types, not after it finishes
+- **Status Line** — Claude Code bottom bar showing sessions, costs, and IM status
+- **Claude Code Skill** — `/termlive setup` to get started, `/termlive start` to run
+- **Cross-platform** — Linux, macOS, Windows
+- **Docker Ready** — `docker compose up` for one-click deployment
 
 ## Quick Start
 
-```bash
-# Install (see Installation below)
-go install github.com/termlive/termlive/cmd/tlive@latest
-
-# Wrap a command with Web UI
-tlive run python train.py
-
-# Open the URL printed in terminal (or scan QR code)
-```
-
-TermLive prints a local + LAN URL and QR code. Open it on any device to watch and interact with the session in real-time.
-
-## Installation
-
-### From source (requires Go 1.24+)
+### As a Claude Code Skill
 
 ```bash
-go install github.com/termlive/termlive/cmd/tlive@latest
+# Install
+npx termlive setup
+
+# In Claude Code
+/termlive setup    # Interactive configuration wizard
+/termlive start    # Start Go Core + IM Bridge
+/termlive status   # Check what's running
 ```
 
-### Build from source
+### Standalone
 
 ```bash
-git clone https://github.com/termlive/termlive.git
-cd termlive
-make build
+# One-click install
+curl -fsSL https://raw.githubusercontent.com/termlive/termlive/main/scripts/install.sh | bash
+
+# Or via npm
+npm install -g termlive
+npx termlive setup
 ```
 
-The binary is built to `./tlive` (or `./tlive.exe` on Windows).
-
-### Add to PATH
-
-After building, make sure `tlive` is accessible from anywhere:
-
-**Linux / macOS:**
+### Docker
 
 ```bash
-sudo cp ./tlive /usr/local/bin/
+cp .env.example .env    # Fill in your tokens
+docker compose up -d
 ```
 
-**Windows (PowerShell, run as admin):**
-
-```powershell
-Copy-Item .\tlive.exe C:\Windows\System32\
-```
-
-**Or** add the directory containing `tlive` to your system `PATH` environment variable.
-
-### Cross-compile
-
-```bash
-make release
-```
-
-Produces binaries for:
-- `tlive-linux-amd64`
-- `tlive-darwin-amd64`
-- `tlive-darwin-arm64`
-- `tlive-windows-amd64.exe`
-
-## Usage
-
-### `tlive run` — wrap a command
-
-```bash
-tlive run <command> [args...]
-```
-
-Starts the command inside a PTY with a Web UI. The first `tlive run` on the machine starts an embedded daemon; subsequent invocations connect as clients to the same daemon, so all sessions appear in one dashboard.
-
-```bash
-# Examples
-tlive run python train.py --epochs 100
-tlive run npm run build
-tlive run make test
-tlive run bash
-```
-
-**Flags:**
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-p, --port` | `8080` | Web UI / daemon port |
-| `-s, --short-timeout` | `30` | Idle timeout (seconds) when awaiting-input is detected |
-| `-l, --long-timeout` | `120` | Idle timeout (seconds) for unknown idle state |
-| `--ip` | auto-detect | Override LAN IP address |
-
-### `tlive daemon start` — standalone daemon
-
-```bash
-tlive daemon start
-```
-
-Runs the daemon without wrapping a command. Useful when you only need the notification hub (e.g., with `tlive notify` from AI tool hooks).
-
-### `tlive notify` — send a notification
-
-```bash
-tlive notify --type done --message "Training finished, accuracy: 95.2%"
-```
-
-Sends a notification to the running daemon. Exits silently if no daemon is running, so it never blocks automated workflows.
-
-**Types:** `done`, `confirm`, `error`, `progress`
-
-### `tlive init` — AI tool setup
-
-```bash
-tlive init
-```
-
-Generates integration files for Claude Code (skills, rules, hooks, config). After running, Claude Code will automatically notify you via TermLive when tasks complete, errors occur, or input is needed.
-
-**Generated files:**
+## How It Works
 
 ```
-.claude/
-├── skills/termlive-notify/SKILL.md   # Notification skill
-├── rules/termlive.md                 # Project rules
-└── settings.local.json               # Hooks (Notification + Stop events)
-.termlive.toml                        # Daemon config (port, token)
+┌─────────────────────────────────────────────────────────┐
+│                    Claude Code CLI                       │
+│  ┌──────────┐  ┌──────────────┐                         │
+│  │ SKILL.md │  │ Status Line  │                         │
+│  │ /termlive│  │ statusline.sh│                         │
+│  └────┬─────┘  └──────┬───────┘                         │
+└───────┼───────────────┼─────────────────────────────────┘
+        │               │
+        ▼               ▼
+┌─────────────────────────────────────────────────────────┐
+│              Node.js Bridge (IM + AI)                    │
+│                                                          │
+│  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐ │
+│  │ Claude SDK  │  │  Telegram    │  │  Permission    │ │
+│  │ Provider    │  │  Discord     │  │  Gateway       │ │
+│  │             │  │  Feishu      │  │                │ │
+│  └─────────────┘  └──────────────┘  └────────────────┘ │
+│  ┌─────────────────────────────────────────────────┐    │
+│  │           Core Client (HTTP/WebSocket)           │    │
+│  └──────────────────────┬──────────────────────────┘    │
+└─────────────────────────┼───────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────┐
+│              Go Core (tlive-core)                         │
+│                                                          │
+│  ┌──────────┐  ┌───────────┐  ┌──────────┐  ┌───────┐ │
+│  │ PTY Mgr  │  │ Session   │  │ Web UI   │  │ Stats │ │
+│  │          │  │ Manager   │  │ Dashboard│  │       │ │
+│  └──────────┘  └───────────┘  └──────────┘  └───────┘ │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │              HTTP API + WebSocket                 │   │
+│  └──────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
+        │                               │
+        ▼                               ▼
+   Terminal PTY                    Browser (xterm.js)
 ```
+
+**Two components:**
+
+- **Go Core** (`tlive-core`) — PTY management, Web UI, HTTP API, WebSocket streaming. Pure infrastructure, no AI logic.
+- **Node.js Bridge** — Claude Agent SDK, IM platform adapters, permission approval, message delivery. The intelligence layer.
+
+They communicate via HTTP API + WebSocket. Go Core runs standalone for terminal monitoring; add Bridge for AI + IM features.
+
+## IM Interaction
+
+Send messages to Claude Code from your phone. Get streaming responses. Approve tool permissions with buttons.
+
+```
+You (Telegram):  "Fix the login bug in auth.ts"
+                         │
+Claude Code:     Analyzes code, finds the issue...
+                         │
+TermLive (TG):   🔧 Claude is editing src/auth.ts
+                 Streaming: "I found the issue. The token
+                 validation was missing the expiry check..."
+                         │
+TermLive (TG):   🔒 Permission Required
+                 Tool: Edit
+                 File: src/auth.ts, lines 42-58
+                 [Allow] [Allow Session] [Deny]
+                 🖥 View Terminal ↗
+                         │
+You:             Tap [Allow]
+                         │
+TermLive (TG):   ✅ Task Complete
+                 Fixed auth.ts, all tests pass
+                 📊 12.3k/8.1k tok | $0.08 | 2m 34s
+                 📋 Dashboard ↗  🖥 Terminal ↗
+```
+
+### Platform Support
+
+| Feature | Telegram | Discord | Feishu |
+|---------|----------|---------|--------|
+| Streaming | Edit-based, 700ms | Edit-based, 1500ms | CardKit v2, 200ms |
+| Permission buttons | Inline keyboard | Button components | Interactive card |
+| Image support | Yes | Yes | Yes |
+| Character limit | 4096/chunk | 2000/chunk | 30000/chunk |
 
 ## Configuration
 
-TermLive uses `.termlive.toml` in your project root:
+All configuration via `~/.termlive/config.env`:
 
-```toml
-[daemon]
-port = 8080
-token = "your-stable-token"   # auto-generated by 'tlive init'
-auto_start = false
+```env
+# Core
+TL_PORT=8080
+TL_TOKEN=auto-generated-during-setup
+TL_PUBLIC_URL=https://termlive.example.com
 
-[notify]
-channels = ["web"]
+# IM Platforms (configure one or more)
+TL_ENABLED_CHANNELS=telegram,discord,feishu
 
-# WeChat Work webhook
-# [notify.wechat]
-# webhook_url = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=..."
+# Telegram
+TL_TG_BOT_TOKEN=your-bot-token
+TL_TG_ALLOWED_USERS=123456789
 
-# Feishu / Lark webhook (supports HMAC-SHA256 signing)
-# [notify.feishu]
-# webhook_url = "https://open.feishu.cn/open-apis/bot/v2/hook/..."
-# secret = "your-feishu-bot-secret"
+# Discord
+TL_DC_BOT_TOKEN=your-bot-token
+TL_DC_ALLOWED_CHANNELS=channel-id
 
-[notify.options]
-include_context = true
-history_limit = 100
+# Feishu
+TL_FS_APP_ID=your-app-id
+TL_FS_APP_SECRET=your-app-secret
 ```
 
-### Notification channels
+See `.env.example` for the full list.
 
-**Web UI** — always enabled. Access via the URL printed when `tlive run` or `tlive daemon start` runs.
+## Claude Code Skill Commands
 
-**WeChat Work** — set `webhook_url` under `[notify.wechat]` to your bot webhook URL. Notifications are sent as Markdown cards with session info and a link to the Web terminal.
+| Command | Function |
+|---------|----------|
+| `/termlive setup` | Interactive configuration wizard |
+| `/termlive start` | Start Go Core + Node.js Bridge |
+| `/termlive stop` | Stop all services |
+| `/termlive status` | Show service status and connections |
+| `/termlive logs [N]` | View last N log lines |
+| `/termlive doctor` | Run diagnostic checks |
+| `/termlive reconfigure` | Change IM platform settings |
 
-**Feishu / Lark** — set `webhook_url` under `[notify.feishu]` to your bot webhook URL. Optionally set `secret` to enable HMAC-SHA256 signature verification. Notifications are sent as interactive cards.
+Supports English and Chinese: `启动`, `停止`, `状态`, `诊断` all work.
 
-## Architecture
+## Status Line
+
+TermLive adds a status bar to Claude Code's bottom:
 
 ```
-┌──────────────┐     ┌──────────────────────────────────┐
-│ tlive run A  │────▶│         Daemon (embedded)         │
-│  (host)      │     │  ┌───────┐  ┌───────┐  ┌──────┐ │
-└──────────────┘     │  │ API   │  │ WS    │  │ Web  │ │
-                     │  │/api/* │  │/ws/*  │  │UI    │ │
-┌──────────────┐     │  └───┬───┘  └───┬───┘  └──────┘ │
-│ tlive run B  │────▶│      │          │               │
-│  (client)    │HTTP │  SessionManager + Hub            │
-└──────────────┘     └──────────────────────────────────┘
-                              │            │
-┌──────────────┐              ▼            ▼
-│ tlive notify │──POST──▶ /api/notify   Browser
-│  (from hook) │                       (xterm.js)
-└──────────────┘
+TL: 2sess | bridge:on | 12.3k/8.1k tok | $0.08
 ```
 
-- **Host mode** — first `tlive run` starts the daemon in-process, creates a PTY session, and writes a lock file (`~/.termlive/daemon.json`)
-- **Client mode** — subsequent `tlive run` discovers the daemon via lock file, creates sessions via HTTP API, relays I/O over WebSocket
-- **Daemon mode** — `tlive daemon start` runs standalone for notification-only use
+And a real-time status bar to the Web UI dashboard:
+
+```
+● 3 sessions │ TG ● DC ● FS ● │ 12.3k/8.1k tok │ $0.08 │ 2m 34s
+```
 
 ## Development
 
+### Prerequisites
+
+- Go 1.24+ (for Core)
+- Node.js 22+ (for Bridge)
+
+### Build
+
 ```bash
-# Run tests
-make test
+# Go Core
+cd core && go build -o tlive-core ./cmd/tlive-core/
 
-# Build
-make build
-
-# Build all platforms
-make release
+# Node.js Bridge
+cd bridge && npm install && npm run build
 ```
 
-### Project structure
+### Test
 
-```
-cmd/tlive/          CLI commands (cobra)
-internal/
-  config/           TOML configuration
-  daemon/           HTTP server, session manager, lock file
-  generator/        AI tool file generation (Claude Code)
-  hub/              Broadcast hub (fan-out to clients)
-  notify/           Notification channels (WeChat, Feishu, idle detection)
-  pty/              PTY abstraction (Unix + Windows ConPTY)
-  server/           WebSocket server + static file serving
-  session/          Session state and output buffer
-web/                Embedded frontend (HTML + CSS + JS + xterm.js)
+```bash
+# Go tests
+cd core && go test ./... -v -timeout 30s
+
+# Bridge tests (122 tests)
+cd bridge && npm test
 ```
 
-## Platform Notes
+### Project Structure
 
-### Windows Terminal / PowerShell / cmd.exe
+```
+termlive/
+├── core/                    # Go Core → tlive-core binary
+│   ├── cmd/tlive-core/      # CLI entry point
+│   ├── internal/
+│   │   ├── daemon/          # HTTP API, session manager, bridge, stats, tokens
+│   │   ├── server/          # WebSocket handlers, status stream
+│   │   ├── session/         # Session state and output buffer
+│   │   ├── hub/             # Broadcast hub (fan-out to clients)
+│   │   ├── pty/             # PTY abstraction (Unix + Windows ConPTY)
+│   │   ├── config/          # TOML configuration
+│   │   └── notify/          # ANSI utilities
+│   └── web/                 # Embedded Web UI (dashboard + terminal + status bar)
+│
+├── bridge/                  # Node.js Bridge
+│   └── src/
+│       ├── providers/       # Claude Agent SDK + CLI fallback
+│       ├── channels/        # Telegram, Discord, Feishu adapters
+│       ├── engine/          # Conversation engine, router, bridge manager
+│       ├── permissions/     # Permission gateway + broker
+│       ├── delivery/        # Message chunking, retry, rate limiting
+│       ├── markdown/        # IR → per-platform rendering
+│       └── store/           # JSON file persistence
+│
+├── skill/                   # Claude Code skill definition
+│   └── SKILL.md
+│
+├── scripts/                 # CLI, daemon, diagnostics, status line
+├── docker-compose.yml       # One-click Docker deployment
+└── package.json             # npm: termlive
+```
 
-Full support. Raw mode works correctly for interactive terminal sessions.
+## Security
 
-### Git Bash (mintty)
-
-Limited interactive input — mintty doesn't expose Windows Console APIs, so `tlive run` falls back to line-buffered mode. A warning is printed. The Web UI provides full interactive access as an alternative.
-
-### WSL
-
-Works natively inside WSL. Use `--ip` flag if auto-detected IP is incorrect.
+- **Bearer token auth** for all API endpoints (auto-generated during setup)
+- **Scoped tokens** for IM web links (1-hour TTL, read-only, session-specific)
+- **IM user whitelist** per platform (`TL_TG_ALLOWED_USERS`, etc.)
+- **Secret redaction** in all log output
+- **Config file permissions** `chmod 600` on `config.env`
 
 ## License
 
