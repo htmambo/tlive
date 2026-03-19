@@ -3,7 +3,7 @@
 import { execSync, spawn, spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync, writeFileSync, unlinkSync, mkdirSync, chmodSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, unlinkSync, mkdirSync, chmodSync } from 'node:fs';
 import { homedir } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -168,23 +168,63 @@ switch (command) {
       }
       console.log(`Hook scripts installed: ${binDir}`);
 
-      // Show hooks config hint
-      console.log(`
-Add to ~/.claude/settings.json (if not already):
+      // Auto-configure hooks in ~/.claude/settings.json
+      if (target === 'claude') {
+        const settingsPath = join(homedir(), '.claude', 'settings.json');
+        let settings = {};
+        if (existsSync(settingsPath)) {
+          try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')); } catch {}
+        }
 
-  "hooks": {
-    "PreToolUse": [{
-      "type": "command",
-      "command": "${join(binDir, 'hook-handler.sh')}",
-      "timeout": 300000
-    }],
-    "Notification": [{
-      "type": "command",
-      "command": "${join(binDir, 'notify-handler.sh')}",
-      "timeout": 5000
-    }]
-  }
-`);
+        if (!settings.hooks) settings.hooks = {};
+
+        const hookHandlerCmd = join(binDir, 'hook-handler.sh');
+        const notifyHandlerCmd = join(binDir, 'notify-handler.sh');
+
+        // Check if TLive hooks already configured
+        const hasHook = (type, cmd) => {
+          const entries = settings.hooks[type] || [];
+          return entries.some(e => {
+            // Support both flat and nested format
+            if (e.command?.includes('hook-handler.sh') || e.command?.includes('notify-handler.sh')) return true;
+            if (e.hooks) return e.hooks.some(h => h.command?.includes('hook-handler.sh') || h.command?.includes('notify-handler.sh'));
+            return false;
+          });
+        };
+
+        let hooksAdded = false;
+
+        if (!hasHook('PreToolUse', hookHandlerCmd)) {
+          if (!settings.hooks.PreToolUse) settings.hooks.PreToolUse = [];
+          settings.hooks.PreToolUse.push({
+            hooks: [{
+              type: 'command',
+              command: hookHandlerCmd,
+              timeout: 300000,
+            }],
+          });
+          hooksAdded = true;
+        }
+
+        if (!hasHook('Notification', notifyHandlerCmd)) {
+          if (!settings.hooks.Notification) settings.hooks.Notification = [];
+          settings.hooks.Notification.push({
+            hooks: [{
+              type: 'command',
+              command: notifyHandlerCmd,
+              timeout: 5000,
+            }],
+          });
+          hooksAdded = true;
+        }
+
+        if (hooksAdded) {
+          writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
+          console.log(`Hooks configured in: ${settingsPath}`);
+        } else {
+          console.log('Hooks already configured in settings.json');
+        }
+      }
     } else {
       console.log('Usage: tlive install skills [--codex]');
     }
