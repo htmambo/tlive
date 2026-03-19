@@ -8,7 +8,7 @@ import { get } from 'node:https';
 import { execSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const GITHUB_REPO = 'tlive/tlive';
+const GITHUB_REPO = 'y49/TermLive';
 const BIN_DIR = join(homedir(), '.tlive', 'bin');
 
 const PLATFORM_MAP = { linux: 'linux', darwin: 'darwin', win32: 'windows' };
