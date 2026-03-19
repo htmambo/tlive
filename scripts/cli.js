@@ -14,26 +14,38 @@ const DAEMON_SH = join(SCRIPTS_DIR, 'daemon.sh');
 const CORE_BIN = join(homedir(), '.tlive', 'bin', 'tlive-core');
 const PACKAGE_ROOT = join(__dirname, '..');
 
-const HELP_TEXT = `TermLive — Terminal live monitoring + IM bridge
+const HELP_TEXT = `TLive — Terminal live monitoring + IM bridge for AI coding tools
 
-Usage: tlive <command>        Wrap command with web terminal
-       tlive <subcommand>    Manage services
+Usage:
+  tlive <cmd> [args]         Wrap any command with web terminal
+  tlive <subcommand>         Manage TLive services
 
-Commands:
-  <cmd>           Wrap any command with web terminal (e.g. tlive claude)
-  setup           Configure IM platforms and credentials
-  start           Start Go Core + Node.js Bridge
-  stop            Stop all services
-  status          Show service status
-  install skills  Install /tlive skill to Claude Code / Codex
-  logs [N]        Show last N log lines (default: 50)
-  hooks           Show hook status (pause/resume to toggle)
-  doctor          Run diagnostic checks
+Web Terminal:
+  tlive claude               Wrap Claude Code with web-accessible terminal
+  tlive python train.py      Wrap any long-running command
+  tlive npm run build        Access from phone browser via QR code
 
-In Claude Code:
-  /tlive setup    Interactive setup wizard
-  /tlive start    Start services
-  /tlive status   Show status
+Setup (one-time):
+  tlive setup                Configure IM platforms (Telegram/Discord/Feishu)
+  tlive install skills       Install /tlive skill + hooks to Claude Code
+
+Service Management:
+  tlive start                Start IM Bridge daemon
+  tlive stop                 Stop IM Bridge daemon
+  tlive status               Show Bridge + Web Terminal status
+  tlive logs [N]             Show last N log lines (default: 50)
+  tlive doctor               Run diagnostic checks
+
+Hook Control:
+  tlive hooks                Show hook approval status
+  tlive hooks pause          Auto-allow all, no IM notifications
+  tlive hooks resume         Resume IM approval flow
+
+In Claude Code (AI-guided):
+  /tlive                     Start Bridge (with pre-checks)
+  /tlive setup               Interactive setup wizard
+  /tlive reconfigure         Modify specific config fields
+  /tlive doctor              Diagnose issues + suggest fixes
 `;
 
 // Known subcommands handled by Node.js CLI

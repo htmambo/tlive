@@ -40,6 +40,7 @@ Skill directory (SKILL_DIR): the directory where this SKILL.md lives.
 | `logs`, `logs 200`, `查看日志` | logs |
 | `reconfigure`, `修改配置`, `换个 bot`, `改 token` | reconfigure |
 | `doctor`, `diagnose`, `诊断`, `挂了`, `没反应了` | doctor |
+| `help`, `帮助`, `怎么用` | help |
 
 **Disambiguation: `status` vs `doctor`** — Use `status` when the user just wants to check if the bridge is running. Use `doctor` when the user reports a problem or suspects something is broken. When in doubt and the user describes a symptom (e.g., "没反应了", "挂了"), prefer `doctor`.
 
@@ -200,6 +201,37 @@ fi
 ```
 
 Then validate IM tokens if configured — read `SKILL_DIR/references/token-validation.md` for commands.
+
+### `help`
+
+Show a clear overview of the TLive system and available commands:
+
+```
+TLive — Three features, use any combination:
+
+In Claude Code (/tlive):
+  /tlive               Start IM Bridge (chat from phone)
+  /tlive setup         Configure IM platforms (AI-guided)
+  /tlive reconfigure   Modify specific config fields
+  /tlive stop          Stop Bridge
+  /tlive status        Show Bridge + Web Terminal + Hooks status
+  /tlive logs [N]      Show last N log lines
+  /tlive doctor        Diagnose issues + suggest fixes
+
+In terminal (tlive):
+  tlive <cmd>          Wrap command with web terminal (e.g. tlive claude)
+  tlive setup          Configure IM platforms (interactive)
+  tlive install skills Install /tlive skill + hooks to Claude Code
+  tlive hooks pause    Auto-allow permissions, no IM notifications
+  tlive hooks resume   Resume IM approval flow
+
+In IM (from phone):
+  /new                 Start new conversation
+  /verbose 0|1|2       Set detail level (quiet/normal/detailed)
+  /hooks pause|resume  Toggle hook approval
+  /status              Check status
+  /help                Show commands
+```
 
 ## Notes
 

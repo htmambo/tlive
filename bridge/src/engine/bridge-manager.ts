@@ -277,7 +277,19 @@ export class BridgeManager {
       case '/help': {
         await adapter.send({
           chatId: msg.chatId,
-          text: 'Commands:\n/status - Show status\n/new - New session\n/verbose 0|1|2 - Set detail level\n/hooks pause|resume - Toggle hook approval\n/help - Show help',
+          text: [
+            'TLive IM Commands:',
+            '',
+            '/new              New conversation',
+            '/verbose 0|1|2    Detail level',
+            '  0 = quiet (result only)',
+            '  1 = normal (tools + streaming)',
+            '  2 = detailed (tools + input summary)',
+            '/hooks pause      Auto-allow, no notifications',
+            '/hooks resume     Resume IM approval',
+            '/status           Bridge + hooks status',
+            '/help             This message',
+          ].join('\n'),
         });
         return true;
       }
