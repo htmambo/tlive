@@ -89,14 +89,15 @@ Usage: tlive <command>        Wrap command with web terminal
        tlive <subcommand>    Manage services
 
 Commands:
-  <cmd>       Wrap any command with web terminal (e.g. tlive claude)
-  setup       Configure IM platforms and credentials
-  start       Start Go Core + Node.js Bridge
-  stop        Stop all services
-  status      Show service status
-  logs [N]    Show last N log lines (default: 50)
-  hooks       Show hook status (pause/resume to toggle)
-  doctor      Run diagnostic checks
+  <cmd>           Wrap any command with web terminal (e.g. tlive claude)
+  setup           Configure IM platforms and credentials
+  start           Start Go Core + Node.js Bridge
+  stop            Stop all services
+  status          Show service status
+  install skills  Install /tlive skill to Claude Code / Codex
+  logs [N]        Show last N log lines (default: 50)
+  hooks           Show hook status (pause/resume to toggle)
+  doctor          Run diagnostic checks
 
 In Claude Code:
   /tlive setup    Interactive setup wizard
