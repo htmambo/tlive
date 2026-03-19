@@ -24,6 +24,8 @@ type Session struct {
 	Pid       int
 	Status    Status
 	StartTime time.Time
+	Rows      uint16
+	Cols      uint16
 	mu        sync.Mutex
 	output    []byte
 }
@@ -59,6 +61,19 @@ func (s *Session) LastOutput(n int) []byte {
 	result := make([]byte, n)
 	copy(result, s.output[len(s.output)-n:])
 	return result
+}
+
+func (s *Session) Size() (uint16, uint16) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.Rows, s.Cols
+}
+
+func (s *Session) SetSize(rows, cols uint16) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Rows = rows
+	s.Cols = cols
 }
 
 func (s *Session) Duration() time.Duration {

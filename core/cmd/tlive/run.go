@@ -122,9 +122,9 @@ func runHost(cfg *config.Config, args []string, rows, cols uint16, lockPath stri
 		localIP = getLocalIP()
 	}
 	srv := server.New(mgr)
-	mgr.SetResizeFunc(ms.Session.ID, func(r, c uint16) {
-		ms.Proc.Resize(r, c)
-	})
+	// Host mode: local terminal owns PTY size, ignore web resize
+	// Web xterm.js will adapt to whatever PTY size the local terminal sets
+	mgr.SetResizeFunc(ms.Session.ID, nil)
 	srv.SetWebFS(web.Assets)
 	d.SetExtraHandler(srv.Handler())
 
@@ -153,6 +153,11 @@ func runHost(cfg *config.Config, args []string, rows, cols uint16, lockPath stri
 		fmt.Fprintf(os.Stderr, "  Note: Raw mode unavailable (Git Bash/mintty detected).\n")
 		fmt.Fprintf(os.Stderr, "  For full interactive input, use Windows Terminal, PowerShell, or cmd.exe.\n")
 		fmt.Fprintf(os.Stderr, "  In this mode, press Enter to send input. Web UI is fully interactive.\n\n")
+	}
+
+	// Sync PTY size after entering raw mode (QR code output may have changed terminal state)
+	if w, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
+		ms.Proc.Resize(uint16(h), uint16(w))
 	}
 
 	// Replay buffered PTY output that may have been broadcast before
@@ -189,6 +194,19 @@ func runHost(cfg *config.Config, args []string, rows, cols uint16, lockPath stri
 
 	// Start idle watcher — auto-shuts down after 15 min idle
 	d.StartIdleWatcher()
+
+	// Handle terminal resize (SIGWINCH)
+	winchCh := make(chan os.Signal, 1)
+	signal.Notify(winchCh, syscall.SIGWINCH)
+	go func() {
+		for range winchCh {
+			if w, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil {
+				r, c := uint16(h), uint16(w)
+				ms.Proc.Resize(r, c)
+				ms.Session.SetSize(r, c)
+			}
+		}
+	}()
 
 	// Wait for process exit or signal
 	sigCh := make(chan os.Signal, 1)

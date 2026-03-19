@@ -17,6 +17,9 @@ body {
     min-height: 100vh;
     padding-bottom: 36px;
 }
+body.terminal-page {
+    overflow: hidden;
+}
 
 /* Header */
 header {
@@ -270,10 +273,12 @@ main {
 .terminal-wrapper {
     position: relative;
     height: calc(100vh - 45px);
+    overflow: hidden;
 }
 .terminal-container {
     height: 100%;
     background: #000;
+    overflow: hidden;
 }
 .disconnect-overlay {
     position: absolute;

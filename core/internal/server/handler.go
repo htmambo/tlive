@@ -38,6 +38,16 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	client := NewWSClient(conn)
 
+	// Send current PTY size so web client can match it
+	if rows, cols := ms.Session.Size(); rows > 0 && cols > 0 {
+		sizeMsg, _ := json.Marshal(map[string]interface{}{
+			"type": "size",
+			"rows": rows,
+			"cols": cols,
+		})
+		client.SendText(sizeMsg)
+	}
+
 	// Replay buffered output so the browser sees prior ANSI
 	// style/color sequences and existing terminal content.
 	if buf := ms.Session.LastOutput(64 * 1024); len(buf) > 0 {

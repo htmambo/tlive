@@ -24,8 +24,8 @@
 
     var fitAddon = new FitAddon.FitAddon();
     term.loadAddon(fitAddon);
-    term.open(document.getElementById('terminal'));
-    fitAddon.fit();
+    var termEl = document.getElementById('terminal');
+    term.open(termEl);
 
     var statusBadge = document.getElementById('session-status');
     var statusText = document.getElementById('status-text');
@@ -37,6 +37,10 @@
     var ws = null;
     var reconnectTimer = null;
     var processExited = false;
+
+    // Host mode: server sends PTY size, we lock to it (no fit/resize)
+    // Client mode: no size message, we fit to browser and resize PTY
+    var lockedSize = null;
 
     function setConnected(connected) {
         if (connected) {
@@ -66,11 +70,13 @@
 
         ws.onopen = function() {
             setConnected(true);
-            sendResize();
+            if (!lockedSize) {
+                fitAddon.fit();
+                sendResize();
+            }
         };
 
         ws.onmessage = function(event) {
-            // Text frames carry JSON control messages (e.g. exit notification)
             if (typeof event.data === 'string') {
                 try {
                     var ctrl = JSON.parse(event.data);
@@ -79,11 +85,16 @@
                         showExitOverlay(ctrl.code);
                         return;
                     }
+                    if (ctrl.type === 'size') {
+                        // Server tells us the PTY's actual size — lock to it
+                        lockedSize = { rows: ctrl.rows, cols: ctrl.cols };
+                        term.resize(ctrl.cols, ctrl.rows);
+                        return;
+                    }
                 } catch(e) { /* not JSON, treat as terminal data */ }
                 term.write(event.data);
                 return;
             }
-            // Binary frames are terminal output
             var data = new TextDecoder().decode(event.data);
             term.write(data);
         };
@@ -103,8 +114,15 @@
         }
     });
 
-    term.onResize(function() { sendResize(); });
-    window.addEventListener('resize', function() { fitAddon.fit(); });
+    term.onResize(function() {
+        if (!lockedSize) sendResize();
+    });
+
+    window.addEventListener('resize', function() {
+        if (!lockedSize) {
+            fitAddon.fit();
+        }
+    });
 
     // Fetch session info for header
     fetch('/api/sessions', { headers: { 'Authorization': 'Bearer ' + tokenParam } }).then(function(r) { return r.json(); }).then(function(sessions) {

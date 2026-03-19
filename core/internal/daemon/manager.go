@@ -76,8 +76,10 @@ func (m *SessionManager) CreateSession(cmd string, args []string, cfg SessionCon
 		return nil, fmt.Errorf("pty start: %w", err)
 	}
 
-	// 4. Set session PID
+	// 4. Set session PID and size
 	sess.Pid = proc.Pid()
+	sess.Rows = cfg.Rows
+	sess.Cols = cfg.Cols
 
 	// 5. Set hub input handler to write to PTY
 	h.SetInputHandler(func(data []byte) {
