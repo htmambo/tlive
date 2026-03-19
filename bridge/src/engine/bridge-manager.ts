@@ -9,8 +9,8 @@ import { getBridgeContext } from '../context.js';
 import { loadConfig } from '../config.js';
 import { StreamController, type VerboseLevel } from './stream-controller.js';
 import { CostTracker } from './cost-tracker.js';
-import { existsSync, writeFileSync, unlinkSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 
 export class BridgeManager {
@@ -262,6 +262,7 @@ export class BridgeManager {
         const pauseFile = join(homedir(), '.tlive', 'hooks-paused');
         const sub = parts[1]?.toLowerCase();
         if (sub === 'pause') {
+          mkdirSync(dirname(pauseFile), { recursive: true });
           writeFileSync(pauseFile, '');
           await adapter.send({ chatId: msg.chatId, text: '⏸ Hooks paused — auto-allow, no notifications.' });
         } else if (sub === 'resume') {
