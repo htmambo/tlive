@@ -5,6 +5,9 @@
 
 HOOK_JSON=$(cat)
 
+# Check if hooks are paused
+[ -f "$HOME/.tlive/hooks-paused" ] && exit 0
+
 # Source config
 [ -f "$HOME/.tlive/config.env" ] && source "$HOME/.tlive/config.env" 2>/dev/null
 TL_PORT="${TL_PORT:-8080}"

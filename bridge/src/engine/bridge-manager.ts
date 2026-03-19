@@ -9,6 +9,9 @@ import { getBridgeContext } from '../context.js';
 import { loadConfig } from '../config.js';
 import { StreamController, type VerboseLevel } from './stream-controller.js';
 import { CostTracker } from './cost-tracker.js';
+import { existsSync, writeFileSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 
 export class BridgeManager {
   private adapters = new Map<string, BaseChannelAdapter>();
@@ -255,10 +258,25 @@ export class BridgeManager {
         }
         return true;
       }
+      case '/hooks': {
+        const pauseFile = join(homedir(), '.tlive', 'hooks-paused');
+        const sub = parts[1]?.toLowerCase();
+        if (sub === 'pause') {
+          writeFileSync(pauseFile, '');
+          await adapter.send({ chatId: msg.chatId, text: '⏸ Hooks paused — auto-allow, no notifications.' });
+        } else if (sub === 'resume') {
+          try { unlinkSync(pauseFile); } catch {}
+          await adapter.send({ chatId: msg.chatId, text: '▶ Hooks resumed — forwarding to IM.' });
+        } else {
+          const paused = existsSync(pauseFile);
+          await adapter.send({ chatId: msg.chatId, text: `Hooks: ${paused ? '⏸ paused' : '▶ active'}` });
+        }
+        return true;
+      }
       case '/help': {
         await adapter.send({
           chatId: msg.chatId,
-          text: 'Commands:\n/status - Show status\n/new - New session\n/verbose 0|1|2 - Set detail level\n/help - Show help',
+          text: 'Commands:\n/status - Show status\n/new - New session\n/verbose 0|1|2 - Set detail level\n/hooks pause|resume - Toggle hook approval\n/help - Show help',
         });
         return true;
       }

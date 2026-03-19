@@ -239,4 +239,45 @@ describe('BridgeManager', () => {
     expect(clearIntervalSpy).toHaveBeenCalled();
     clearIntervalSpy.mockRestore();
   });
+
+  describe('/hooks command', () => {
+    it('shows hook status', async () => {
+      const adapter = mockAdapter();
+      manager.registerAdapter(adapter);
+
+      await manager.handleInboundMessage(adapter, {
+        channelType: 'telegram', chatId: 'c1', userId: 'u1', text: '/hooks', messageId: 'm1',
+      });
+
+      expect(adapter.send).toHaveBeenCalledWith(
+        expect.objectContaining({ text: expect.stringContaining('Hooks:') })
+      );
+    });
+
+    it('handles /hooks pause', async () => {
+      const adapter = mockAdapter();
+      manager.registerAdapter(adapter);
+
+      await manager.handleInboundMessage(adapter, {
+        channelType: 'telegram', chatId: 'c1', userId: 'u1', text: '/hooks pause', messageId: 'm1',
+      });
+
+      expect(adapter.send).toHaveBeenCalledWith(
+        expect.objectContaining({ text: expect.stringContaining('paused') })
+      );
+    });
+
+    it('handles /hooks resume', async () => {
+      const adapter = mockAdapter();
+      manager.registerAdapter(adapter);
+
+      await manager.handleInboundMessage(adapter, {
+        channelType: 'telegram', chatId: 'c1', userId: 'u1', text: '/hooks resume', messageId: 'm1',
+      });
+
+      expect(adapter.send).toHaveBeenCalledWith(
+        expect.objectContaining({ text: expect.stringContaining('resumed') })
+      );
+    });
+  });
 });

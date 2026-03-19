@@ -3,7 +3,7 @@
 import { execSync, spawn } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync, unlinkSync } from 'node:fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const [,, command, ...args] = process.argv;
@@ -47,6 +47,22 @@ switch (command) {
     run(`bash ${DAEMON_SH} logs ${args[0] || '50'}`);
     break;
 
+  case 'hooks': {
+    const hooksSub = args[0];
+    const pauseFile = join(process.env.HOME, '.tlive', 'hooks-paused');
+    if (hooksSub === 'pause') {
+      writeFileSync(pauseFile, '');
+      console.log('Hooks paused — all permissions auto-allowed, no notifications.');
+    } else if (hooksSub === 'resume') {
+      try { unlinkSync(pauseFile); } catch {}
+      console.log('Hooks resumed — permissions forwarded to IM.');
+    } else {
+      const paused = existsSync(pauseFile);
+      console.log(`Hooks: ${paused ? '⏸ paused (auto-allow)' : '▶ active'}`);
+    }
+    break;
+  }
+
   case 'doctor':
     run(`bash ${join(SCRIPTS_DIR, 'doctor.sh')}`);
     break;
@@ -62,6 +78,7 @@ Commands:
   stop        Stop all services
   status      Show service status
   logs [N]    Show last N log lines (default: 50)
+  hooks       Show hook status (pause/resume to toggle)
   doctor      Run diagnostic checks
 
 In Claude Code:
