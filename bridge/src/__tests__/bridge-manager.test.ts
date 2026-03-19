@@ -12,6 +12,7 @@ function mockAdapter(channelType = 'telegram'): BaseChannelAdapter {
     consumeOne: vi.fn().mockImplementation(() => messageQueue.shift() ?? null),
     send: vi.fn().mockResolvedValue({ messageId: '1', success: true }),
     editMessage: vi.fn(),
+    sendTyping: vi.fn().mockResolvedValue(undefined),
     validateConfig: vi.fn().mockReturnValue(null),
     isAuthorized: vi.fn().mockReturnValue(true),
     _pushMessage: (msg: any) => messageQueue.push(msg),
@@ -100,5 +101,68 @@ describe('BridgeManager', () => {
     });
     expect(handled).toBe(true);
     expect(adapter.send).toHaveBeenCalled();
+  });
+
+  it('sends typing indicator on message', async () => {
+    const adapter = mockAdapter();
+    manager.registerAdapter(adapter);
+
+    await manager.handleInboundMessage(adapter, {
+      channelType: 'telegram', chatId: 'c1', userId: 'u1', text: 'hello', messageId: 'm1',
+    });
+
+    expect((adapter as any).sendTyping).toHaveBeenCalledWith('c1');
+  });
+
+  it('handles /verbose command', async () => {
+    const adapter = mockAdapter();
+    manager.registerAdapter(adapter);
+
+    await manager.handleInboundMessage(adapter, {
+      channelType: 'telegram', chatId: 'c1', userId: 'u1', text: '/verbose 2', messageId: 'm1',
+    });
+
+    expect(adapter.send).toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.stringContaining('Verbose level: 2') })
+    );
+  });
+
+  it('handles /verbose with invalid arg', async () => {
+    const adapter = mockAdapter();
+    manager.registerAdapter(adapter);
+
+    await manager.handleInboundMessage(adapter, {
+      channelType: 'telegram', chatId: 'c1', userId: 'u1', text: '/verbose 5', messageId: 'm1',
+    });
+
+    expect(adapter.send).toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.stringContaining('Usage') })
+    );
+  });
+
+  it('handles /new command with rebind', async () => {
+    const adapter = mockAdapter();
+    manager.registerAdapter(adapter);
+
+    await manager.handleInboundMessage(adapter, {
+      channelType: 'telegram', chatId: 'c1', userId: 'u1', text: '/new', messageId: 'm1',
+    });
+
+    expect(adapter.send).toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.stringContaining('New session') })
+    );
+  });
+
+  it('updates /help text to include /verbose', async () => {
+    const adapter = mockAdapter();
+    manager.registerAdapter(adapter);
+
+    await manager.handleInboundMessage(adapter, {
+      channelType: 'telegram', chatId: 'c1', userId: 'u1', text: '/help', messageId: 'm1',
+    });
+
+    expect(adapter.send).toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.stringContaining('/verbose') })
+    );
   });
 });

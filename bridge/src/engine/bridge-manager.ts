@@ -7,6 +7,8 @@ import { PendingPermissions } from '../permissions/gateway.js';
 import { DeliveryLayer } from '../delivery/delivery.js';
 import { getBridgeContext } from '../context.js';
 import { loadConfig } from '../config.js';
+import { StreamController, type VerboseLevel } from './stream-controller.js';
+import { CostTracker } from './cost-tracker.js';
 
 export class BridgeManager {
   private adapters = new Map<string, BaseChannelAdapter>();
@@ -19,6 +21,8 @@ export class BridgeManager {
   private coreUrl: string;
   private token: string;
   private coreAvailable = false;
+  private verboseLevels = new Map<string, VerboseLevel>();
+  private lastActive = new Map<string, number>();
 
   constructor() {
     const config = loadConfig();
@@ -57,6 +61,31 @@ export class BridgeManager {
     for (const adapter of this.adapters.values()) {
       await adapter.stop();
     }
+  }
+
+  private stateKey(channelType: string, chatId: string): string {
+    return `${channelType}:${chatId}`;
+  }
+
+  private getVerboseLevel(channelType: string, chatId: string): VerboseLevel {
+    return this.verboseLevels.get(this.stateKey(channelType, chatId)) ?? 1;
+  }
+
+  private setVerboseLevel(channelType: string, chatId: string, level: VerboseLevel): void {
+    this.verboseLevels.set(this.stateKey(channelType, chatId), level);
+  }
+
+  private checkAndUpdateLastActive(channelType: string, chatId: string): boolean {
+    const key = this.stateKey(channelType, chatId);
+    const last = this.lastActive.get(key);
+    const now = Date.now();
+    this.lastActive.set(key, now);
+    if (last && (now - last) > 30 * 60 * 1000) return true;
+    return false;
+  }
+
+  private clearLastActive(channelType: string, chatId: string): void {
+    this.lastActive.delete(this.stateKey(channelType, chatId));
   }
 
   private async runAdapterLoop(adapter: BaseChannelAdapter): Promise<void> {
@@ -118,36 +147,81 @@ export class BridgeManager {
       return this.handleCommand(adapter, msg);
     }
 
-    // Regular message → conversation engine
+    // Session resume: check timeout before resolving
+    const expired = this.checkAndUpdateLastActive(msg.channelType, msg.chatId);
+    if (expired) {
+      const newId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      await this.router.rebind(msg.channelType, msg.chatId, newId);
+    }
+
     const binding = await this.router.resolve(msg.channelType, msg.chatId);
 
-    const result = await this.engine.processMessage({
-      sessionId: binding.sessionId,
-      text: msg.text,
-      onTextDelta: (delta) => {
-        // TODO: streaming preview via adapter.editMessage
-      },
-      onPermissionRequest: async (req) => {
-        await this.broker.forwardPermissionRequest(req, msg.chatId, [adapter]);
+    // Start typing heartbeat
+    const typingInterval = setInterval(() => {
+      adapter.sendTyping(msg.chatId);
+    }, 4000);
+    adapter.sendTyping(msg.chatId);
+
+    const verboseLevel = this.getVerboseLevel(msg.channelType, msg.chatId);
+    const costTracker = new CostTracker();
+    costTracker.start();
+
+    const platformLimits: Record<string, number> = { telegram: 4096, discord: 2000, feishu: 30000 };
+    const stream = new StreamController({
+      verboseLevel,
+      platformLimit: platformLimits[adapter.channelType] ?? 4096,
+      flushCallback: async (content, isEdit) => {
+        if (!isEdit) {
+          const result = await adapter.send({ chatId: msg.chatId, text: content });
+          clearInterval(typingInterval);
+          return result.messageId;
+        } else {
+          await adapter.editMessage(msg.chatId, stream.messageId!, { chatId: msg.chatId, text: content });
+        }
       },
     });
 
-    // Deliver response (skip if empty)
-    const responseText = result.text.trim();
-    if (responseText) {
-      const platformLimits: Record<string, number> = { telegram: 4096, discord: 2000, feishu: 30000 };
-      await this.delivery.deliver(adapter, msg.chatId, responseText, {
-        platformLimit: platformLimits[adapter.channelType] ?? 4096,
+    try {
+      const result = await this.engine.processMessage({
+        sessionId: binding.sessionId,
+        text: msg.text,
+        onTextDelta: (delta) => stream.onTextDelta(delta),
+        onToolUse: (event) => stream.onToolStart(event.name, event.input),
+        onResult: (event) => {
+          if (verboseLevel > 0) {
+            const usage = event.usage ?? { input_tokens: 0, output_tokens: 0 };
+            const stats = costTracker.finish(usage);
+            stream.onComplete(stats);
+          }
+        },
+        onError: (err) => stream.onError(err),
+        onPermissionRequest: async (req) => {
+          await this.broker.forwardPermissionRequest(req, msg.chatId, [adapter]);
+        },
       });
-    } else {
-      await adapter.send({ chatId: msg.chatId, text: '(no response)' });
+
+      // Level 0: deliver final response via delivery layer (stream didn't flush text)
+      if (verboseLevel === 0) {
+        const responseText = result.text.trim();
+        const usage = result.usage ?? { input_tokens: 0, output_tokens: 0 };
+        const stats = costTracker.finish(usage);
+        const costLine = CostTracker.format(stats);
+        const fullText = responseText ? `${responseText}\n${costLine}` : costLine;
+        await this.delivery.deliver(adapter, msg.chatId, fullText, {
+          platformLimit: platformLimits[adapter.channelType] ?? 4096,
+        });
+      }
+    } finally {
+      clearInterval(typingInterval);
+      stream.dispose();
     }
 
     return true;
   }
 
   private async handleCommand(adapter: BaseChannelAdapter, msg: InboundMessage): Promise<boolean> {
-    const cmd = msg.text.split(' ')[0].toLowerCase();
+    const parts = msg.text.split(' ');
+    const cmd = parts[0].toLowerCase();
 
     switch (cmd) {
       case '/status': {
@@ -160,14 +234,27 @@ export class BridgeManager {
         return true;
       }
       case '/new': {
-        await this.router.resolve(msg.channelType, msg.chatId);
-        await adapter.send({ chatId: msg.chatId, text: 'New session created.' });
+        const newSessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        await this.router.rebind(msg.channelType, msg.chatId, newSessionId);
+        this.clearLastActive(msg.channelType, msg.chatId);
+        await adapter.send({ chatId: msg.chatId, text: '🆕 New session started.' });
+        return true;
+      }
+      case '/verbose': {
+        const level = parseInt(parts[1]) as VerboseLevel;
+        if ([0, 1, 2].includes(level)) {
+          this.setVerboseLevel(msg.channelType, msg.chatId, level);
+          const labels = ['quiet', 'normal', 'detailed'];
+          await adapter.send({ chatId: msg.chatId, text: `Verbose level: ${level} (${labels[level]})` });
+        } else {
+          await adapter.send({ chatId: msg.chatId, text: 'Usage: /verbose 0|1|2\n0=quiet, 1=normal, 2=detailed' });
+        }
         return true;
       }
       case '/help': {
         await adapter.send({
           chatId: msg.chatId,
-          text: 'Commands:\n/status - Show status\n/new - New session\n/help - Show help',
+          text: 'Commands:\n/status - Show status\n/new - New session\n/verbose 0|1|2 - Set detail level\n/help - Show help',
         });
         return true;
       }
