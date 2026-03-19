@@ -16,9 +16,9 @@ type unixProcess struct {
 	hasPgid bool
 }
 
-func Start(name string, args []string, rows, cols uint16) (Process, error) {
+func Start(name string, args []string, rows, cols uint16, extraEnv ...string) (Process, error) {
 	cmd := exec.Command(name, args...)
-	cmd.Env = os.Environ()
+	cmd.Env = append(os.Environ(), extraEnv...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Rows: rows, Cols: cols})
@@ -26,7 +26,7 @@ func Start(name string, args []string, rows, cols uint16) (Process, error) {
 		// Retry without Setpgid — some environments (containers, certain
 		// security policies) reject setpgid with EPERM.
 		cmd = exec.Command(name, args...)
-		cmd.Env = os.Environ()
+		cmd.Env = append(os.Environ(), extraEnv...)
 		ptmx, err = pty.StartWithSize(cmd, &pty.Winsize{Rows: rows, Cols: cols})
 		if err != nil {
 			return nil, err

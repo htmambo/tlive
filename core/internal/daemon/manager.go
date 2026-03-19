@@ -70,7 +70,7 @@ func (m *SessionManager) CreateSession(cmd string, args []string, cfg SessionCon
 	go h.Run()
 
 	// 3. Start PTY process
-	proc, err := pty.Start(cmd, args, cfg.Rows, cfg.Cols)
+	proc, err := pty.Start(cmd, args, cfg.Rows, cfg.Cols, "TLIVE_SESSION_ID="+sess.ID)
 	if err != nil {
 		h.Stop()
 		return nil, fmt.Errorf("pty start: %w", err)

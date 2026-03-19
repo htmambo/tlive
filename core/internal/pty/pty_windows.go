@@ -5,6 +5,7 @@ package pty
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -20,10 +21,17 @@ type windowsProcess struct {
 	closeErr  error
 }
 
-func Start(name string, args []string, rows, cols uint16) (Process, error) {
+func Start(name string, args []string, rows, cols uint16, extraEnv ...string) (Process, error) {
 	cmdLine := name
 	if len(args) > 0 {
 		cmdLine = name + " " + strings.Join(args, " ")
+	}
+
+	// conpty doesn't support per-process env, set on parent
+	for _, env := range extraEnv {
+		if parts := strings.SplitN(env, "=", 2); len(parts) == 2 {
+			os.Setenv(parts[0], parts[1])
+		}
 	}
 
 	cpty, err := conpty.Start(cmdLine, conpty.ConPtyDimensions(int(cols), int(rows)))

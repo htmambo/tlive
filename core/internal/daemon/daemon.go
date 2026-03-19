@@ -119,7 +119,18 @@ type DeleteSessionResponse struct {
 func (d *Daemon) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/status", d.handleStatus)
-	mux.HandleFunc("/api/sessions/", d.handleDeleteSession)
+	mux.HandleFunc("/api/sessions/", func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
+		if strings.HasSuffix(path, "/input") && r.Method == http.MethodPost {
+			d.handleSessionInput(w, r)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			d.handleDeleteSession(w, r)
+			return
+		}
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	})
 	mux.HandleFunc("/api/sessions", d.handleSessions)
 	mux.HandleFunc("/api/hooks/permission/", d.handleHookPermissionResolve)
 	mux.HandleFunc("/api/hooks/permission", d.handleHookPermission)
@@ -286,10 +297,6 @@ func (d *Daemon) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d *Daemon) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
 	if id == "" {
 		http.Error(w, "session ID required", http.StatusBadRequest)
@@ -301,6 +308,33 @@ func (d *Daemon) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(DeleteSessionResponse{OK: true})
+}
+
+// handleSessionInput handles POST /api/sessions/:id/input — writes text to PTY stdin.
+func (d *Daemon) handleSessionInput(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/sessions/")
+	id := strings.TrimSuffix(path, "/input")
+	if id == "" {
+		http.Error(w, "session ID required", http.StatusBadRequest)
+		return
+	}
+
+	ms, ok := d.mgr.GetSession(id)
+	if !ok {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	var body struct {
+		Text string `json:"text"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	ms.Hub.Input([]byte(body.Text))
+	w.WriteHeader(http.StatusOK)
 }
 
 // --- Hooks handlers ---
