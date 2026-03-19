@@ -158,9 +158,9 @@ export class BridgeManager {
 
     // Start typing heartbeat
     const typingInterval = setInterval(() => {
-      adapter.sendTyping(msg.chatId);
+      adapter.sendTyping(msg.chatId).catch(() => {});
     }, 4000);
-    adapter.sendTyping(msg.chatId);
+    adapter.sendTyping(msg.chatId).catch(() => {});
 
     const verboseLevel = this.getVerboseLevel(msg.channelType, msg.chatId);
     const costTracker = new CostTracker();
@@ -181,6 +181,8 @@ export class BridgeManager {
       },
     });
 
+    let completedStats: import('./cost-tracker.js').UsageStats | undefined;
+
     try {
       const result = await this.engine.processMessage({
         sessionId: binding.sessionId,
@@ -188,10 +190,10 @@ export class BridgeManager {
         onTextDelta: (delta) => stream.onTextDelta(delta),
         onToolUse: (event) => stream.onToolStart(event.name, event.input),
         onResult: (event) => {
+          const usage = event.usage ?? { input_tokens: 0, output_tokens: 0 };
+          completedStats = costTracker.finish(usage);
           if (verboseLevel > 0) {
-            const usage = event.usage ?? { input_tokens: 0, output_tokens: 0 };
-            const stats = costTracker.finish(usage);
-            stream.onComplete(stats);
+            stream.onComplete(completedStats);
           }
         },
         onError: (err) => stream.onError(err),
@@ -203,9 +205,11 @@ export class BridgeManager {
       // Level 0: deliver final response via delivery layer (stream didn't flush text)
       if (verboseLevel === 0) {
         const responseText = result.text.trim();
-        const usage = result.usage ?? { input_tokens: 0, output_tokens: 0 };
-        const stats = costTracker.finish(usage);
-        const costLine = CostTracker.format(stats);
+        if (!completedStats) {
+          const usage = result.usage ?? { input_tokens: 0, output_tokens: 0 };
+          completedStats = costTracker.finish(usage);
+        }
+        const costLine = CostTracker.format(completedStats);
         const fullText = responseText ? `${responseText}\n${costLine}` : costLine;
         await this.delivery.deliver(adapter, msg.chatId, fullText, {
           platformLimit: platformLimits[adapter.channelType] ?? 4096,
@@ -241,7 +245,7 @@ export class BridgeManager {
         return true;
       }
       case '/verbose': {
-        const level = parseInt(parts[1]) as VerboseLevel;
+        const level = parseInt(parts[1], 10) as VerboseLevel;
         if ([0, 1, 2].includes(level)) {
           this.setVerboseLevel(msg.channelType, msg.chatId, level);
           const labels = ['quiet', 'normal', 'detailed'];
