@@ -264,8 +264,10 @@ async function main() {
     }
   }, 2000);
 
-  // Track notification IDs already sent to IM
+  // Track notification IDs already sent to IM.
+  // Record startup time to skip stale notifications from before this Bridge process started.
   const sentNotificationIds = new Set<string>();
+  const bridgeStartTime = new Date();
 
   // Poll Go Core for hook notifications (idle_prompt, stop, etc.)
   const notifyPollInterval = setInterval(async () => {
@@ -281,6 +283,10 @@ async function main() {
       for (const notif of notifications) {
         if (sentNotificationIds.has(notif.id)) continue;
         sentNotificationIds.add(notif.id);
+
+        // Skip notifications from before this Bridge process started
+        const notifTime = (notif as { timestamp?: string }).timestamp;
+        if (notifTime && new Date(notifTime) < bridgeStartTime) continue;
 
         // Parse the stored message (raw hook JSON) to get hook data
         let hookData: HookNotificationData = notif as HookNotificationData;
