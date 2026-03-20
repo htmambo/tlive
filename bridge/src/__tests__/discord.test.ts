@@ -132,18 +132,81 @@ describe('DiscordAdapter', () => {
       expect(call.components).toHaveLength(1);
     });
 
-    it('truncates content to 2000 chars', async () => {
+    it('chunks content exceeding 2000 chars into multiple messages', async () => {
       await adapter.start();
       const longText = 'a'.repeat(2500);
       await adapter.send({ chatId: 'channel1', text: longText });
-      const call = mockSend.mock.calls[0][0];
-      expect(call.content.length).toBe(2000);
+      expect(mockSend.mock.calls.length).toBeGreaterThan(1);
+      // All chunks combined should equal original content
+      const allContent = mockSend.mock.calls.map((c: any) => c[0].content).join('');
+      expect(allContent).toBe(longText);
+    });
+
+    it('sends multiple messages for long content with newlines', async () => {
+      await adapter.start();
+      const longText = 'x\n'.repeat(1500);
+      await adapter.send({ chatId: 'channel1', text: longText });
+      const channel = await (adapter as any).client.channels.fetch('channel1');
+      expect(channel.send.mock.calls.length).toBeGreaterThan(1);
+    });
+
+    it('attaches buttons only to last chunk', async () => {
+      await adapter.start();
+      const longText = 'a'.repeat(2500);
+      await adapter.send({
+        chatId: 'channel1',
+        text: longText,
+        buttons: [{ label: 'OK', callbackData: 'ok', style: 'primary' as const }],
+      });
+      const calls = mockSend.mock.calls;
+      expect(calls.length).toBeGreaterThan(1);
+      // Only the last call should have components
+      for (let i = 0; i < calls.length - 1; i++) {
+        expect(calls[i][0].components).toBeUndefined();
+      }
+      expect(calls[calls.length - 1][0].components).toHaveLength(1);
     });
 
     it('uses html content when text is not provided', async () => {
       await adapter.start();
       await adapter.send({ chatId: 'channel1', html: '<b>bold</b>' });
       expect(mockSend).toHaveBeenCalledWith(expect.objectContaining({ content: '<b>bold</b>' }));
+    });
+  });
+
+  describe('reply support', () => {
+    it('includes reply reference when replyToMessageId set', async () => {
+      await adapter.start();
+      await adapter.send({ chatId: 'channel1', text: 'response', replyToMessageId: 'msg-123' });
+      const channel = await (adapter as any).client.channels.fetch('channel1');
+      const payload = channel.send.mock.calls[0][0];
+      expect(payload.reply?.messageReference?.messageId).toBe('msg-123');
+    });
+
+    it('reply reference only on first chunk', async () => {
+      await adapter.start();
+      const longText = 'a'.repeat(2500);
+      await adapter.send({ chatId: 'channel1', text: longText, replyToMessageId: 'msg-456' });
+      const calls = mockSend.mock.calls;
+      expect(calls.length).toBeGreaterThan(1);
+      expect(calls[0][0].reply?.messageReference?.messageId).toBe('msg-456');
+      for (let i = 1; i < calls.length; i++) {
+        expect(calls[i][0].reply).toBeUndefined();
+      }
+    });
+  });
+
+  describe('error wrapping', () => {
+    it('wraps send errors as BridgeError', async () => {
+      await adapter.start();
+      mockSend.mockRejectedValueOnce(new Error('Discord API failed'));
+      try {
+        await adapter.send({ chatId: 'channel1', text: 'fail' });
+        expect.unreachable('should have thrown');
+      } catch (err: any) {
+        expect(err.name).toBeDefined();
+        expect(err.retryable).toBeDefined();
+      }
     });
   });
 

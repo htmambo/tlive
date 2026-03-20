@@ -65,9 +65,27 @@ export function chunkMarkdown(text: string, limit: number): string[] {
       result.push(chunk);
     } else {
       let remaining = chunk;
+      // Detect if this chunk is inside a code block (starts with ``` fence)
+      const startsWithFence = /^```/.test(remaining);
+      let insideFence = startsWithFence;
+
       while (remaining.length > limit) {
-        result.push(remaining.slice(0, limit));
+        let slice = remaining.slice(0, limit);
         remaining = remaining.slice(limit);
+
+        if (insideFence) {
+          // Count fences in the slice to track state
+          const fences = (slice.match(/```/g) || []).length;
+          const openAtEnd = (startsWithFence ? fences : fences + 1) % 2 !== 0;
+          if (openAtEnd && remaining.length > 0) {
+            // Close the fence in this slice, reopen in the next
+            const closeTag = '\n```';
+            slice = slice.slice(0, limit - closeTag.length) + closeTag;
+            remaining = '```\n' + remaining;
+          }
+        }
+
+        result.push(slice);
       }
       if (remaining) result.push(remaining);
     }

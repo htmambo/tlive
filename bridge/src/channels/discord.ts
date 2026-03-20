@@ -10,6 +10,8 @@ import {
 import { BaseChannelAdapter, registerAdapterFactory } from './base.js';
 import type { InboundMessage, OutboundMessage, SendResult } from './types.js';
 import { loadConfig } from '../config.js';
+import { chunkMarkdown } from '../delivery/delivery.js';
+import { classifyError } from './errors.js';
 
 interface DiscordConfig {
   botToken: string;
@@ -82,25 +84,38 @@ export class DiscordAdapter extends BaseChannelAdapter {
     }
 
     const content = message.text ?? message.html ?? '';
-    // Discord has a 2000 char message limit
-    const truncated = content.length > 2000 ? content.slice(0, 2000) : content;
+    const chunks = chunkMarkdown(content, 2000);
 
-    const payload: Parameters<TextChannel['send']>[0] = { content: truncated };
+    let lastSent: Message | undefined;
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        const payload: Parameters<TextChannel['send']>[0] = { content: chunks[i] };
 
-    if (message.buttons?.length) {
-      const row = new ActionRowBuilder<ButtonBuilder>();
-      for (const btn of message.buttons) {
-        const button = new ButtonBuilder()
-          .setCustomId(btn.callbackData)
-          .setLabel(btn.label)
-          .setStyle(btn.style === 'danger' ? ButtonStyle.Danger : ButtonStyle.Primary);
-        row.addComponents(button);
+        // Reply reference on first chunk only
+        if (i === 0 && message.replyToMessageId) {
+          (payload as any).reply = { messageReference: { messageId: message.replyToMessageId } };
+        }
+
+        // Buttons on last chunk only
+        if (i === chunks.length - 1 && message.buttons?.length) {
+          const row = new ActionRowBuilder<ButtonBuilder>();
+          for (const btn of message.buttons) {
+            const button = new ButtonBuilder()
+              .setCustomId(btn.callbackData)
+              .setLabel(btn.label)
+              .setStyle(btn.style === 'danger' ? ButtonStyle.Danger : ButtonStyle.Primary);
+            row.addComponents(button);
+          }
+          payload.components = [row];
+        }
+
+        lastSent = await channel.send(payload) as Message;
       }
-      payload.components = [row];
+    } catch (err) {
+      throw classifyError('discord', err);
     }
 
-    const sent = await channel.send(payload) as Message;
-    return { messageId: sent.id, success: true };
+    return { messageId: lastSent?.id ?? '', success: true };
   }
 
   async editMessage(chatId: string, messageId: string, message: OutboundMessage): Promise<void> {
