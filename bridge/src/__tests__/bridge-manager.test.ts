@@ -293,7 +293,7 @@ describe('BridgeManager', () => {
       });
 
       expect(adapter.send).toHaveBeenCalledWith(
-        expect.objectContaining({ text: '[Local] ✅ Task complete' })
+        expect.objectContaining({ text: '🖥 [Local] ✅ Task complete' })
       );
     });
 
@@ -306,7 +306,7 @@ describe('BridgeManager', () => {
       });
 
       expect(adapter.send).toHaveBeenCalledWith(
-        expect.objectContaining({ text: '[Local] Claude is waiting for your input' })
+        expect.objectContaining({ text: '🖥 [Local] Claude is waiting for your input' })
       );
     });
 

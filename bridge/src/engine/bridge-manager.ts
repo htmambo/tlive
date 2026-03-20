@@ -108,7 +108,7 @@ export class BridgeManager {
     const parts: string[] = [];
 
     if (hookType === 'stop') {
-      parts.push('[Local] ✅ Task complete');
+      parts.push('🖥 [Local] ✅ Task complete');
 
       // Use last_assistant_message from Claude Code Stop hook (primary),
       // fall back to last_output enriched by Go Core from PTY buffer
@@ -118,9 +118,9 @@ export class BridgeManager {
         parts.push('', `> ${truncated.replace(/\n/g, '\n> ')}`);
       }
     } else if (hook.notification_type === 'idle_prompt') {
-      parts.push(`[Local] ${hook.message || 'Claude is waiting for input...'}`);
+      parts.push(`🖥 [Local] ${hook.message || 'Claude is waiting for input...'}`);
     } else {
-      parts.push(`[Local] ${hook.message || 'Notification'}`);
+      parts.push(`🖥 [Local] ${hook.message || 'Notification'}`);
     }
 
     // Add web terminal link if Go Core is available

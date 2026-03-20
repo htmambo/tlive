@@ -11,6 +11,75 @@ import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
+/** Format a permission card for IM display — human-readable, not raw JSON */
+function formatPermissionCard(toolName: string, input: unknown): string {
+  const parts: string[] = ['🔐 [Local] Permission Required'];
+  const data = (typeof input === 'string' ? (() => { try { return JSON.parse(input); } catch { return {}; } })() : input) as Record<string, unknown>;
+
+  switch (toolName) {
+    case 'Bash': {
+      const cmd = String(data.command || '');
+      const desc = data.description ? `\n${data.description}` : '';
+      parts.push(`\n🖥 Bash${desc}\n\`\`\`\n${cmd.length > 500 ? cmd.slice(0, 497) + '...' : cmd}\n\`\`\``);
+      break;
+    }
+    case 'Edit': {
+      const file = String(data.file_path || '').replace(/^\/home\/[^/]+\//, '~/');
+      const oldStr = String(data.old_string || '');
+      const newStr = String(data.new_string || '');
+      const diffLines: string[] = [];
+      oldStr.split('\n').forEach(l => diffLines.push(`- ${l}`));
+      newStr.split('\n').forEach(l => diffLines.push(`+ ${l}`));
+      const diff = diffLines.join('\n');
+      parts.push(`\n📝 Edit: \`${file}\`\n\`\`\`diff\n${diff.length > 500 ? diff.slice(0, 497) + '...' : diff}\n\`\`\``);
+      break;
+    }
+    case 'Write': {
+      const file = String(data.file_path || '').replace(/^\/home\/[^/]+\//, '~/');
+      const content = String(data.content || '');
+      const preview = content.length > 200 ? content.slice(0, 197) + '...' : content;
+      parts.push(`\n📄 Write: \`${file}\` (${content.length} chars)\n\`\`\`\n${preview}\n\`\`\``);
+      break;
+    }
+    case 'Read': {
+      const file = String(data.file_path || '').replace(/^\/home\/[^/]+\//, '~/');
+      parts.push(`\n📖 Read: \`${file}\``);
+      break;
+    }
+    case 'NotebookEdit': {
+      const file = String(data.file_path || '').replace(/^\/home\/[^/]+\//, '~/');
+      parts.push(`\n📓 NotebookEdit: \`${file}\``);
+      break;
+    }
+    case 'Skill': {
+      const skill = String(data.skill || '');
+      const skillArgs = data.args ? `\nArgs: ${data.args}` : '';
+      parts.push(`\n⚡ Skill: \`${skill}\`${skillArgs}`);
+      break;
+    }
+    case 'Agent': {
+      const desc = String(data.description || data.prompt || '').slice(0, 200);
+      const agentType = data.subagent_type ? ` (${data.subagent_type})` : '';
+      parts.push(`\n🤖 Agent${agentType}\n${desc}`);
+      break;
+    }
+    case 'WebFetch': {
+      parts.push(`\n🌐 WebFetch: \`${data.url || ''}\``);
+      break;
+    }
+    default: {
+      // MCP tools or unknown — show tool name + key fields
+      const inputStr = typeof input === 'string' ? input : JSON.stringify(input, null, 2);
+      const truncated = inputStr.length > 500 ? inputStr.slice(0, 497) + '...' : inputStr;
+      parts.push(`\n🔧 ${toolName}\n\`\`\`\n${truncated}\n\`\`\``);
+      break;
+    }
+  }
+
+  parts.push('\n⏱ Expires in 5 minutes');
+  return parts.join('');
+}
+
 // Whether Go Core daemon is reachable (for web terminal links in IM)
 let coreAvailable = false;
 let coreClient: CoreClientImpl | null = null;
@@ -132,6 +201,8 @@ async function main() {
         id: string;
         tool_name: string;
         input: unknown;
+        session_id?: string;
+        permission_suggestions?: unknown[];
         created_at: string;
       }>;
 
@@ -140,15 +211,20 @@ async function main() {
         if (sentPermissionIds.has(perm.id)) continue;
         sentPermissionIds.add(perm.id);
 
-        // Format tool info for IM display
-        const inputStr = typeof perm.input === 'string'
-          ? perm.input
-          : JSON.stringify(perm.input, null, 2);
-        const truncatedInput = inputStr.length > 500 ? inputStr.slice(0, 497) + '...' : inputStr;
+        // Format tool info for IM display (human-readable)
+        const text = formatPermissionCard(perm.tool_name, perm.input);
 
-        const text = `[Local] 🔒 Permission Required\n\nTool: \`${perm.tool_name}\`\n\`\`\`\n${truncatedInput}\n\`\`\`\n\n⏱ Expires in 5 minutes`;
+        // Build buttons: Allow, (optionally) Always Allow, Deny
+        const sid = perm.session_id || '';
+        const buttons: Array<{ label: string; callbackData: string; style: 'primary' | 'danger' }> = [
+          { label: '✅ Allow', callbackData: `hook:allow:${perm.id}:${sid}`, style: 'primary' },
+        ];
+        if (perm.permission_suggestions && perm.permission_suggestions.length > 0) {
+          buttons.push({ label: '📌 Always', callbackData: `hook:allow_always:${perm.id}:${sid}`, style: 'primary' });
+        }
+        buttons.push({ label: '❌ Deny', callbackData: `hook:deny:${perm.id}:${sid}`, style: 'danger' });
 
-        // Send to all active IM adapters with Allow/Deny buttons
+        // Send to all active IM adapters
         for (const adapter of manager.getAdapters()) {
           const chatId = config.telegram.chatId;
           if (!chatId) continue;
@@ -157,14 +233,11 @@ async function main() {
             const sendResult = await adapter.send({
               chatId,
               text,
-              buttons: [
-                { label: '✅ Allow', callbackData: `hook:allow:${perm.id}`, style: 'primary' as const },
-                { label: '❌ Deny', callbackData: `hook:deny:${perm.id}`, style: 'danger' as const },
-              ],
+              buttons,
             });
-            // Track for reply routing (perm may have tlive_session_id from hook script)
-            if ((perm as any).tlive_session_id) {
-              manager.trackHookMessage(sendResult.messageId, (perm as any).tlive_session_id);
+            // Track for reply routing
+            if (perm.session_id) {
+              manager.trackHookMessage(sendResult.messageId, perm.session_id);
             }
           } catch (err) {
             logger.warn(`Failed to send permission to ${adapter.channelType}: ${err}`);
