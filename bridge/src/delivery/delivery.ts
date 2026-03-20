@@ -1,5 +1,6 @@
 import type { BaseChannelAdapter } from '../channels/base.js';
 import type { OutboundMessage } from '../channels/types.js';
+import { BridgeError } from '../channels/errors.js';
 import { ChatRateLimiter } from './rate-limiter.js';
 
 interface DeliveryOptions {
@@ -131,6 +132,8 @@ export class DeliveryLayer {
         return;
       } catch (err) {
         lastError = err as Error;
+        // Don't retry non-retryable errors
+        if (err instanceof BridgeError && !err.retryable) throw err;
         if (attempt < maxRetries - 1) {
           const delay = Math.min(1000 * Math.pow(2, attempt), 10_000);
           await new Promise(r => setTimeout(r, delay));
