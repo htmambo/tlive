@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 // postinstall: download Go Core binary + copy hook scripts to ~/.tlive/bin/
-import { createWriteStream, chmodSync, mkdirSync, existsSync, copyFileSync } from 'node:fs';
+import { createWriteStream, readFileSync, chmodSync, mkdirSync, existsSync, copyFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir, platform, arch } from 'node:os';
 import { get } from 'node:https';
-import { execSync } from 'node:child_process';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const GITHUB_REPO = 'y49/TermLive';
@@ -14,14 +13,11 @@ const BIN_DIR = join(homedir(), '.tlive', 'bin');
 const PLATFORM_MAP = { linux: 'linux', darwin: 'darwin', win32: 'windows' };
 const ARCH_MAP = { x64: 'amd64', arm64: 'arm64' };
 
-async function getLatestVersion() {
+function getVersion() {
+  // Use package.json version directly — matches the git tag used for releases
   try {
-    const result = execSync(
-      `curl -sf https://api.github.com/repos/${GITHUB_REPO}/releases/latest`,
-      { encoding: 'utf-8', timeout: 10000 }
-    );
-    const data = JSON.parse(result);
-    return data.tag_name || 'latest';
+    const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
+    return `v${pkg.version}`;
   } catch {
     return 'latest';
   }
@@ -82,7 +78,7 @@ async function downloadGoBinary() {
 
   mkdirSync(BIN_DIR, { recursive: true });
 
-  const version = await getLatestVersion();
+  const version = getVersion();
   const url = `https://github.com/${GITHUB_REPO}/releases/download/${version}/tlive-${os}-${cpu}${ext}`;
 
   console.log(`Downloading tlive-core for ${os}-${cpu}...`);
