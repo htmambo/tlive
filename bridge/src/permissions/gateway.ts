@@ -3,6 +3,11 @@ export interface PermissionResult {
   message?: string;
 }
 
+export interface WaitForOptions {
+  onTimeout?: (toolUseId: string) => void;
+  timeoutMs?: number;
+}
+
 export class PendingPermissions {
   private pending = new Map<string, {
     resolve: (r: PermissionResult) => void;
@@ -10,12 +15,14 @@ export class PendingPermissions {
   }>();
   private timeoutMs = 5 * 60 * 1000; // 5 minutes
 
-  waitFor(toolUseId: string): Promise<PermissionResult> {
-    return new Promise((resolve) => {
+  waitFor(toolUseId: string, options?: WaitForOptions): Promise<PermissionResult> {
+    const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
+    return new Promise<PermissionResult>((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(toolUseId);
+        options?.onTimeout?.(toolUseId);
         resolve({ behavior: 'deny', message: 'Permission request timed out' });
-      }, this.timeoutMs);
+      }, timeoutMs);
       this.pending.set(toolUseId, { resolve, timer });
     });
   }

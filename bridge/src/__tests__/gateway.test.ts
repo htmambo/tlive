@@ -56,4 +56,34 @@ describe('PendingPermissions', () => {
     gateway.resolve('t1', true);
     expect(gateway.pendingCount()).toBe(1);
   });
+
+  describe('timeout callback', () => {
+    it('invokes onTimeout before resolving with deny', async () => {
+      vi.useFakeTimers();
+      const gw = new PendingPermissions();
+      const onTimeout = vi.fn();
+
+      const promise = gw.waitFor('tool-1', { onTimeout, timeoutMs: 1000 });
+      vi.advanceTimersByTime(1001);
+
+      const result = await promise;
+      expect(result.behavior).toBe('deny');
+      expect(onTimeout).toHaveBeenCalledWith('tool-1');
+
+      vi.useRealTimers();
+    });
+
+    it('uses default timeout when options not provided', async () => {
+      vi.useFakeTimers();
+      const gw = new PendingPermissions();
+
+      const promise = gw.waitFor('tool-2');
+      vi.advanceTimersByTime(5 * 60 * 1000 + 1);
+
+      const result = await promise;
+      expect(result.behavior).toBe('deny');
+
+      vi.useRealTimers();
+    });
+  });
 });
