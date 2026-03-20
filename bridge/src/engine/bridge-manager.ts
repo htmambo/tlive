@@ -235,8 +235,12 @@ export class BridgeManager {
       return this.handleCommand(adapter, msg);
     }
 
-    // Update last active time (for status display), but never auto-create new session
-    this.checkAndUpdateLastActive(msg.channelType, msg.chatId);
+    // Check for session expiry (>30 min inactivity) and auto-create new session
+    const expired = this.checkAndUpdateLastActive(msg.channelType, msg.chatId);
+    if (expired) {
+      const newSessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      await this.router.rebind(msg.channelType, msg.chatId, newSessionId);
+    }
 
     const binding = await this.router.resolve(msg.channelType, msg.chatId);
 
