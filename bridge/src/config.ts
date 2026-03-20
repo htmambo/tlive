@@ -24,6 +24,9 @@ export interface Config {
   feishu: {
     appId: string;
     appSecret: string;
+    verificationToken: string;
+    encryptKey: string;
+    webhookPort: number;
     allowedUsers: string[];
   };
 }
@@ -94,6 +97,9 @@ export function loadConfig(): Config {
     feishu: {
       appId: get('TL_FS_APP_ID'),
       appSecret: get('TL_FS_APP_SECRET'),
+      verificationToken: get('TL_FS_VERIFICATION_TOKEN'),
+      encryptKey: get('TL_FS_ENCRYPT_KEY'),
+      webhookPort: parseInt(get('TL_FS_WEBHOOK_PORT', '9100'), 10),
       allowedUsers: parseList(get('TL_FS_ALLOWED_USERS')),
     },
   };

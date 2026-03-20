@@ -1,4 +1,5 @@
-import { Client } from '@larksuiteoapi/node-sdk';
+import { createServer, type Server } from 'node:http';
+import { Client, EventDispatcher, CardActionHandler } from '@larksuiteoapi/node-sdk';
 import { BaseChannelAdapter, registerAdapterFactory } from './base.js';
 import type { InboundMessage, OutboundMessage, SendResult } from './types.js';
 import { loadConfig } from '../config.js';
@@ -6,12 +7,16 @@ import { loadConfig } from '../config.js';
 interface FeishuConfig {
   appId: string;
   appSecret: string;
+  verificationToken: string;
+  encryptKey: string;
+  webhookPort: number;
   allowedUsers: string[];
 }
 
 export class FeishuAdapter extends BaseChannelAdapter {
   readonly channelType = 'feishu' as const;
   private client: Client | null = null;
+  private server: Server | null = null;
   private config: FeishuConfig;
   private messageQueue: InboundMessage[] = [];
 
@@ -25,9 +30,99 @@ export class FeishuAdapter extends BaseChannelAdapter {
       appId: this.config.appId,
       appSecret: this.config.appSecret,
     });
+
+    const eventDispatcher = new EventDispatcher({
+      verificationToken: this.config.verificationToken,
+      encryptKey: this.config.encryptKey,
+    });
+
+    eventDispatcher.register({
+      'im.message.receive_v1': async (event: any) => {
+        const msg = event?.message;
+        if (!msg || msg.message_type !== 'text') return;
+
+        let text = '';
+        try {
+          const content = JSON.parse(msg.content);
+          text = content.text ?? '';
+        } catch {
+          return;
+        }
+
+        const userId = event?.sender?.sender_id?.user_id ?? '';
+
+        this.messageQueue.push({
+          channelType: 'feishu',
+          chatId: msg.chat_id,
+          userId,
+          text,
+          messageId: msg.message_id,
+        });
+      },
+    });
+
+    const cardHandler = new CardActionHandler({}, (data: any) => {
+      const callbackData = data?.action?.value?.action;
+      if (!callbackData) return {};
+
+      this.messageQueue.push({
+        channelType: 'feishu',
+        chatId: data.open_chat_id ?? '',
+        userId: data.open_id ?? '',
+        text: '',
+        callbackData,
+        messageId: data.open_message_id ?? '',
+      });
+
+      return {};
+    });
+
+    this.server = createServer(async (req, res) => {
+      if (req.method !== 'POST') {
+        res.writeHead(404);
+        res.end('Not Found');
+        return;
+      }
+
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) {
+        chunks.push(chunk as Buffer);
+      }
+      const body = Buffer.concat(chunks).toString('utf-8');
+
+      let result: any;
+      try {
+        if (req.url === '/event') {
+          result = await eventDispatcher.invoke(body);
+        } else if (req.url === '/card') {
+          result = await cardHandler.invoke(body);
+        } else {
+          res.writeHead(404);
+          res.end('Not Found');
+          return;
+        }
+      } catch (err) {
+        res.writeHead(500);
+        res.end('Internal Server Error');
+        return;
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result ?? {}));
+    });
+
+    await new Promise<void>((resolve) => {
+      this.server!.listen(this.config.webhookPort, () => resolve());
+    });
   }
 
   async stop(): Promise<void> {
+    if (this.server) {
+      await new Promise<void>((resolve, reject) => {
+        this.server!.close((err) => (err ? reject(err) : resolve()));
+      });
+      this.server = null;
+    }
     this.client = null;
   }
 
@@ -70,13 +165,13 @@ export class FeishuAdapter extends BaseChannelAdapter {
           receive_id: message.chatId,
           msg_type: 'interactive',
           content: this.buildCard(text, message.buttons),
+          ...(message.replyToMessageId ? { root_id: message.replyToMessageId } : {}),
         },
       });
 
       const messageId = (result as any)?.data?.message_id ?? '';
       return { messageId: String(messageId), success: true };
     } else {
-      // Post message for plain text (rich text format)
       const post = {
         zh_cn: {
           content: [[{ tag: 'md', text }]],
@@ -89,6 +184,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
           receive_id: message.chatId,
           msg_type: 'post',
           content: JSON.stringify(post),
+          ...(message.replyToMessageId ? { root_id: message.replyToMessageId } : {}),
         },
       });
 

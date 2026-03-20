@@ -3,6 +3,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 // Mock @larksuiteoapi/node-sdk before importing the adapter
 const mockMessageCreate = vi.fn();
 const mockMessagePatch = vi.fn().mockResolvedValue({});
+const mockEventHandler = vi.fn();
+const mockCardHandler = vi.fn();
 
 vi.mock('@larksuiteoapi/node-sdk', () => {
   const MockClient = vi.fn(function (this: any) {
@@ -11,13 +13,58 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
         create: mockMessageCreate,
         patch: mockMessagePatch,
       },
+      v1: { messageResource: { get: vi.fn().mockResolvedValue({ data: null }) } },
     };
   });
 
-  return { Client: MockClient };
+  const MockEventDispatcher = vi.fn(function (this: any) {
+    this.register = vi.fn((handlers: Record<string, Function>) => {
+      for (const [key, fn] of Object.entries(handlers)) {
+        mockEventHandler.mockImplementation(fn);
+      }
+    });
+    this.invoke = vi.fn(async (body: string) => {
+      const parsed = JSON.parse(body);
+      if (parsed.type === 'url_verification') {
+        return { challenge: parsed.challenge };
+      }
+      if (parsed.event) {
+        await mockEventHandler(parsed.event);
+      }
+      return {};
+    });
+  });
+
+  const MockCardActionHandler = vi.fn(function (this: any, _cfg: any, handler: Function) {
+    mockCardHandler.mockImplementation(handler);
+    this.invoke = vi.fn(async (body: string) => {
+      const parsed = JSON.parse(body);
+      return mockCardHandler(parsed) ?? {};
+    });
+  });
+
+  return {
+    Client: MockClient,
+    EventDispatcher: MockEventDispatcher,
+    CardActionHandler: MockCardActionHandler,
+  };
 });
 
 import { FeishuAdapter } from '../channels/feishu.js';
+
+async function getPort(adapter: FeishuAdapter): Promise<number> {
+  const server = (adapter as any).server;
+  return server?.address()?.port ?? 0;
+}
+
+async function postToEndpoint(port: number, path: string, body: object): Promise<any> {
+  const resp = await fetch(`http://localhost:${port}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return resp.json();
+}
 
 describe('FeishuAdapter', () => {
   let adapter: FeishuAdapter;
@@ -29,6 +76,9 @@ describe('FeishuAdapter', () => {
     adapter = new FeishuAdapter({
       appId: 'cli_test123',
       appSecret: 'secret_abc',
+      verificationToken: 'verify_token',
+      encryptKey: '',
+      webhookPort: 0,
       allowedUsers: ['user1', 'user2'],
     });
   });
@@ -39,12 +89,12 @@ describe('FeishuAdapter', () => {
 
   describe('validateConfig()', () => {
     it('returns error when appId is missing', () => {
-      const bad = new FeishuAdapter({ appId: '', appSecret: 'sec', allowedUsers: [] });
+      const bad = new FeishuAdapter({ appId: '', appSecret: 'sec', verificationToken: '', encryptKey: '', webhookPort: 0, allowedUsers: [] });
       expect(bad.validateConfig()).toContain('TL_FS_APP_ID');
     });
 
     it('returns error when appSecret is missing', () => {
-      const bad = new FeishuAdapter({ appId: 'id', appSecret: '', allowedUsers: [] });
+      const bad = new FeishuAdapter({ appId: 'id', appSecret: '', verificationToken: '', encryptKey: '', webhookPort: 0, allowedUsers: [] });
       expect(bad.validateConfig()).toContain('TL_FS_APP_SECRET');
     });
 
@@ -63,7 +113,7 @@ describe('FeishuAdapter', () => {
     });
 
     it('allows all users when allowedUsers is empty', () => {
-      const open = new FeishuAdapter({ appId: 'id', appSecret: 'sec', allowedUsers: [] });
+      const open = new FeishuAdapter({ appId: 'id', appSecret: 'sec', verificationToken: '', encryptKey: '', webhookPort: 0, allowedUsers: [] });
       expect(open.isAuthorized('anyone', 'anychat')).toBe(true);
     });
   });
@@ -96,6 +146,7 @@ describe('FeishuAdapter', () => {
 
       expect(result.success).toBe(true);
       expect(result.messageId).toBe('msg-feishu-1');
+      await adapter.stop();
     });
 
     it('sends post message for plain text (no buttons)', async () => {
@@ -115,6 +166,7 @@ describe('FeishuAdapter', () => {
 
       expect(result.success).toBe(true);
       expect(result.messageId).toBe('msg-feishu-1');
+      await adapter.stop();
     });
 
     it('uses html content as text when text is not provided', async () => {
@@ -125,6 +177,7 @@ describe('FeishuAdapter', () => {
       expect(call.data.msg_type).toBe('post');
       const post = JSON.parse(call.data.content);
       expect(post.zh_cn.content[0][0].text).toBe('**bold**');
+      await adapter.stop();
     });
 
     it('sends message content using markdown tag', async () => {
@@ -139,6 +192,7 @@ describe('FeishuAdapter', () => {
       const card = JSON.parse(call.data.content);
       // markdown element carries the text
       expect(card.elements[0].tag).toBe('markdown');
+      await adapter.stop();
     });
 
     it('sets receive_id and receive_id_type correctly', async () => {
@@ -148,6 +202,20 @@ describe('FeishuAdapter', () => {
       const call = mockMessageCreate.mock.calls[0][0];
       expect(call.params.receive_id_type).toBe('chat_id');
       expect(call.data.receive_id).toBe('oc_specific_chat');
+      await adapter.stop();
+    });
+
+    it('passes root_id when replyToMessageId is set', async () => {
+      await adapter.start();
+      await adapter.send({
+        chatId: 'oc_chat123',
+        text: 'Reply text',
+        replyToMessageId: 'msg-parent-1',
+      });
+
+      const call = mockMessageCreate.mock.calls[0][0];
+      expect(call.data.root_id).toBe('msg-parent-1');
+      await adapter.stop();
     });
 
     it('throws when client is not started', async () => {
@@ -164,6 +232,7 @@ describe('FeishuAdapter', () => {
       await expect(
         adapter.send({ chatId: 'oc_chat', text: 'test' }),
       ).resolves.toBeDefined();
+      await adapter.stop();
     });
 
     it('clears client on stop so subsequent sends fail', async () => {
@@ -195,6 +264,7 @@ describe('FeishuAdapter', () => {
       const card = JSON.parse(call.data.content);
       expect(card.elements[0].tag).toBe('markdown');
       expect(card.elements[0].content).toBe('Updated content');
+      await adapter.stop();
     });
 
     it('does nothing when client is not started', async () => {
@@ -207,6 +277,65 @@ describe('FeishuAdapter', () => {
     it('is a no-op that resolves without error', async () => {
       await adapter.start();
       await expect(adapter.sendTyping('oc_chat123')).resolves.toBeUndefined();
+      await adapter.stop();
+    });
+  });
+
+  describe('webhook event handling', () => {
+    it('processes text messages via webhook', async () => {
+      await adapter.start();
+      const port = await getPort(adapter);
+
+      await postToEndpoint(port, '/event', {
+        event: {
+          message: {
+            message_id: 'msg_1', chat_id: 'chat_1',
+            message_type: 'text',
+            content: JSON.stringify({ text: 'Hello' }),
+          },
+          sender: { sender_id: { user_id: 'user_1' } },
+        },
+      });
+
+      const msg = await adapter.consumeOne();
+      expect(msg).not.toBeNull();
+      expect(msg!.text).toBe('Hello');
+      expect(msg!.chatId).toBe('chat_1');
+
+      await adapter.stop();
+    });
+
+    it('handles URL verification challenge', async () => {
+      await adapter.start();
+      const port = await getPort(adapter);
+
+      const resp = await postToEndpoint(port, '/event', {
+        type: 'url_verification',
+        challenge: 'test_challenge',
+      });
+      expect(resp.challenge).toBe('test_challenge');
+
+      await adapter.stop();
+    });
+  });
+
+  describe('card action callbacks', () => {
+    it('processes button clicks as callbackData', async () => {
+      await adapter.start();
+      const port = await getPort(adapter);
+
+      await postToEndpoint(port, '/card', {
+        action: { value: { action: 'perm:allow:123:s1' } },
+        open_chat_id: 'chat_1',
+        open_id: 'user_1',
+        open_message_id: 'msg_1',
+      });
+
+      const msg = await adapter.consumeOne();
+      expect(msg).not.toBeNull();
+      expect(msg!.callbackData).toBe('perm:allow:123:s1');
+
+      await adapter.stop();
     });
   });
 });
