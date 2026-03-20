@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // postinstall: download Go Core binary + copy hook scripts to ~/.tlive/bin/
-import { createWriteStream, readFileSync, chmodSync, mkdirSync, existsSync, copyFileSync } from 'node:fs';
+import { createWriteStream, readFileSync, chmodSync, mkdirSync, existsSync, copyFileSync, unlinkSync, statSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homedir, platform, arch } from 'node:os';
@@ -72,8 +72,12 @@ async function downloadGoBinary() {
   const dest = join(BIN_DIR, binaryName);
 
   if (existsSync(dest)) {
-    console.log(`tlive-core already exists at ${dest}`);
-    return;
+    if (statSync(dest).size > 0) {
+      console.log(`tlive-core already exists at ${dest}`);
+      return;
+    }
+    // Remove empty/corrupt file from failed download
+    unlinkSync(dest);
   }
 
   mkdirSync(BIN_DIR, { recursive: true });
