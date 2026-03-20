@@ -125,7 +125,7 @@ export class BridgeManager {
       // fall back to last_output enriched by Go Core from PTY buffer
       const summary = (hook.last_assistant_message || hook.last_output || '').trim();
       if (summary) {
-        const truncated = summary.length > 300 ? summary.slice(0, 297) + '...' : summary;
+        const truncated = summary.length > 3000 ? summary.slice(0, 2997) + '...' : summary;
         parts.push('', `> ${truncated.replace(/\n/g, '\n> ')}`);
       }
     } else if (hook.notification_type === 'idle_prompt') {
