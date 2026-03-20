@@ -18,7 +18,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
   });
 
   const MockEventDispatcher = vi.fn(function (this: any) {
-    this.register = vi.fn((handlers: Record<string, Function>) => {
+    this.register = vi.fn((handlers: Record<string, (...args: any[]) => any>) => {
       for (const [key, fn] of Object.entries(handlers)) {
         mockEventHandler.mockImplementation(fn);
       }
@@ -35,7 +35,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
     });
   });
 
-  const MockCardActionHandler = vi.fn(function (this: any, _cfg: any, handler: Function) {
+  const MockCardActionHandler = vi.fn(function (this: any, _cfg: any, handler: (...args: any[]) => any) {
     mockCardHandler.mockImplementation(handler);
     this.invoke = vi.fn(async (body: string) => {
       const parsed = JSON.parse(body);

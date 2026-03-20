@@ -1,8 +1,10 @@
 import { createServer, type Server } from 'node:http';
 import { Client, EventDispatcher, CardActionHandler } from '@larksuiteoapi/node-sdk';
 import { BaseChannelAdapter, registerAdapterFactory } from './base.js';
-import type { InboundMessage, OutboundMessage, SendResult } from './types.js';
+import type { InboundMessage, OutboundMessage, SendResult, FileAttachment } from './types.js';
 import { loadConfig } from '../config.js';
+import { classifyError } from './errors.js';
+import { markdownToFeishu } from '../markdown/feishu.js';
 
 /** Feishu interactive card element (markdown block, action block, etc.) */
 interface FeishuCardElement {
@@ -66,25 +68,92 @@ export class FeishuAdapter extends BaseChannelAdapter {
     eventDispatcher.register({
       'im.message.receive_v1': async (event: { sender?: { sender_id?: { user_id?: string } }; message?: { message_type?: string; content: string; chat_id: string; message_id: string } }) => {
         const msg = event?.message;
-        if (!msg || msg.message_type !== 'text') return;
-
-        let text = '';
-        try {
-          const content = JSON.parse(msg.content);
-          text = content.text ?? '';
-        } catch {
-          return;
-        }
+        if (!msg) return;
 
         const userId = event?.sender?.sender_id?.user_id ?? '';
+        const attachments: FileAttachment[] = [];
 
-        this.messageQueue.push({
-          channelType: 'feishu',
-          chatId: msg.chat_id,
-          userId,
-          text,
-          messageId: msg.message_id,
-        });
+        if (msg.message_type === 'text') {
+          let text = '';
+          try {
+            const content = JSON.parse(msg.content);
+            text = content.text ?? '';
+          } catch {
+            return;
+          }
+
+          this.messageQueue.push({
+            channelType: 'feishu',
+            chatId: msg.chat_id,
+            userId,
+            text,
+            messageId: msg.message_id,
+          });
+        } else if (msg.message_type === 'image') {
+          try {
+            const imageKey = JSON.parse(msg.content).image_key;
+            const resp = await this.client!.im.v1.messageResource.get({
+              path: { message_id: msg.message_id, file_key: imageKey },
+              params: { type: 'image' },
+            });
+            if (resp?.data) {
+              const chunks: Buffer[] = [];
+              for await (const chunk of resp.data as AsyncIterable<Buffer>) {
+                chunks.push(chunk);
+              }
+              const buf = Buffer.concat(chunks);
+              if (buf.length <= 10_000_000) {
+                attachments.push({
+                  type: 'image', name: 'image.png',
+                  mimeType: 'image/png', base64Data: buf.toString('base64'),
+                });
+              }
+            }
+          } catch { /* skip undownloadable images */ }
+
+          if (attachments.length > 0) {
+            this.messageQueue.push({
+              channelType: 'feishu',
+              chatId: msg.chat_id,
+              userId,
+              text: '',
+              messageId: msg.message_id,
+              attachments,
+            });
+          }
+        } else if (msg.message_type === 'file') {
+          try {
+            const fileKey = JSON.parse(msg.content).file_key;
+            const resp = await this.client!.im.v1.messageResource.get({
+              path: { message_id: msg.message_id, file_key: fileKey },
+              params: { type: 'file' },
+            });
+            if (resp?.data) {
+              const chunks: Buffer[] = [];
+              for await (const chunk of resp.data as AsyncIterable<Buffer>) {
+                chunks.push(chunk);
+              }
+              const buf = Buffer.concat(chunks);
+              if (buf.length <= 10_000_000) {
+                attachments.push({
+                  type: 'file', name: 'file',
+                  mimeType: 'application/octet-stream', base64Data: buf.toString('base64'),
+                });
+              }
+            }
+          } catch { /* skip undownloadable files */ }
+
+          if (attachments.length > 0) {
+            this.messageQueue.push({
+              channelType: 'feishu',
+              chatId: msg.chat_id,
+              userId,
+              text: '',
+              messageId: msg.message_id,
+              attachments,
+            });
+          }
+        }
       },
     });
 
@@ -184,40 +253,45 @@ export class FeishuAdapter extends BaseChannelAdapter {
   async send(message: OutboundMessage): Promise<SendResult> {
     if (!this.client) throw new Error('Feishu client not started');
 
-    const text = message.text ?? message.html ?? '';
+    const raw = message.text ?? message.html ?? '';
 
-    if (message.buttons?.length) {
-      const result = await this.client.im.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: message.chatId,
-          msg_type: 'interactive',
-          content: this.buildCard(text, message.buttons),
-          ...(message.replyToMessageId ? { root_id: message.replyToMessageId } : {}),
-        },
-      });
+    try {
+      if (message.buttons?.length) {
+        const result = await this.client.im.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: {
+            receive_id: message.chatId,
+            msg_type: 'interactive',
+            content: this.buildCard(raw, message.buttons),
+            ...(message.replyToMessageId ? { root_id: message.replyToMessageId } : {}),
+          },
+        });
 
-      const messageId = (result as FeishuCreateMessageResult)?.data?.message_id ?? '';
-      return { messageId: String(messageId), success: true };
-    } else {
-      const post = {
-        zh_cn: {
-          content: [[{ tag: 'md', text }]],
-        },
-      };
+        const messageId = (result as FeishuCreateMessageResult)?.data?.message_id ?? '';
+        return { messageId: String(messageId), success: true };
+      } else {
+        const text = markdownToFeishu(raw);
+        const post = {
+          zh_cn: {
+            content: [[{ tag: 'md', text }]],
+          },
+        };
 
-      const result = await this.client.im.message.create({
-        params: { receive_id_type: 'chat_id' },
-        data: {
-          receive_id: message.chatId,
-          msg_type: 'post',
-          content: JSON.stringify(post),
-          ...(message.replyToMessageId ? { root_id: message.replyToMessageId } : {}),
-        },
-      });
+        const result = await this.client.im.message.create({
+          params: { receive_id_type: 'chat_id' },
+          data: {
+            receive_id: message.chatId,
+            msg_type: 'post',
+            content: JSON.stringify(post),
+            ...(message.replyToMessageId ? { root_id: message.replyToMessageId } : {}),
+          },
+        });
 
-      const messageId = (result as FeishuCreateMessageResult)?.data?.message_id ?? '';
-      return { messageId: String(messageId), success: true };
+        const messageId = (result as FeishuCreateMessageResult)?.data?.message_id ?? '';
+        return { messageId: String(messageId), success: true };
+      }
+    } catch (err) {
+      throw classifyError('feishu', err);
     }
   }
 
@@ -225,12 +299,16 @@ export class FeishuAdapter extends BaseChannelAdapter {
     if (!this.client) return;
     const text = message.text ?? message.html ?? '';
 
-    await this.client.im.message.patch({
-      path: { message_id: messageId },
-      data: {
-        content: this.buildCard(text, message.buttons),
-      },
-    });
+    try {
+      await this.client.im.message.patch({
+        path: { message_id: messageId },
+        data: {
+          content: this.buildCard(text, message.buttons),
+        },
+      });
+    } catch (err) {
+      throw classifyError('feishu', err);
+    }
   }
 
   async sendTyping(_chatId: string): Promise<void> {

@@ -180,7 +180,7 @@ describe('DiscordAdapter', () => {
       await adapter.send({ chatId: 'channel1', text: 'response', replyToMessageId: 'msg-123' });
       const channel = await (adapter as any).client.channels.fetch('channel1');
       const payload = channel.send.mock.calls[0][0];
-      expect(payload.reply?.messageReference?.messageId).toBe('msg-123');
+      expect(payload.reply?.messageReference).toBe('msg-123');
     });
 
     it('reply reference only on first chunk', async () => {
@@ -189,7 +189,7 @@ describe('DiscordAdapter', () => {
       await adapter.send({ chatId: 'channel1', text: longText, replyToMessageId: 'msg-456' });
       const calls = mockSend.mock.calls;
       expect(calls.length).toBeGreaterThan(1);
-      expect(calls[0][0].reply?.messageReference?.messageId).toBe('msg-456');
+      expect(calls[0][0].reply?.messageReference).toBe('msg-456');
       for (let i = 1; i < calls.length; i++) {
         expect(calls[i][0].reply).toBeUndefined();
       }
