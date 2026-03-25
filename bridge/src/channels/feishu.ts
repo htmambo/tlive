@@ -4,18 +4,10 @@ import type { InboundMessage, OutboundMessage, SendResult, FileAttachment } from
 import { loadConfig } from '../config.js';
 import { classifyError } from './errors.js';
 import { markdownToFeishu } from '../markdown/feishu.js';
+import { buildFeishuCard } from '../formatting/feishu-card.js';
 
-/** Feishu interactive card element (markdown block, action block, etc.) */
-interface FeishuCardElement {
-  tag: string;
-  content?: string;
-  actions?: Array<{
-    tag: string;
-    text: { tag: string; content: string };
-    type: string;
-    value: Record<string, string>;
-  }>;
-}
+/** Feishu interactive card element – now imported from shared types */
+type FeishuCardElement = import('../formatting/types.js').FeishuCardElement;
 
 /** Shape of the Feishu message.create API response */
 interface FeishuCreateMessageResult {
@@ -181,7 +173,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
     return this.messageQueue.shift() ?? null;
   }
 
-  private buildCard(text: string, buttons?: OutboundMessage['buttons']): string {
+  private buildCard(text: string, buttons?: OutboundMessage['buttons'], header?: { template: string; title: string }): string {
     const elements: FeishuCardElement[] = [
       { tag: 'markdown', content: text },
     ];
@@ -198,8 +190,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
       });
     }
 
-    return JSON.stringify({
-      config: { wide_screen_mode: true },
+    return buildFeishuCard({
+      header: header as any,
       elements,
     });
   }
