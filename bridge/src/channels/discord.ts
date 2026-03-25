@@ -4,6 +4,7 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  EmbedBuilder,
   type TextChannel,
   type Message,
 } from 'discord.js';
@@ -69,8 +70,9 @@ export class DiscordAdapter extends BaseChannelAdapter {
       });
     });
 
-    this.client.on('interactionCreate', (interaction) => {
+    this.client.on('interactionCreate', async (interaction) => {
       if (!interaction.isButton()) return;
+      await interaction.deferUpdate();
       this.messageQueue.push({
         channelType: 'discord',
         chatId: interaction.channelId,
@@ -99,6 +101,39 @@ export class DiscordAdapter extends BaseChannelAdapter {
     const channel = await this.client.channels.fetch(message.chatId) as TextChannel;
     if (!channel || !channel.send) {
       throw new Error(`Channel ${message.chatId} not found or not a text channel`);
+    }
+
+    // Embed-based messages (permission cards, notifications)
+    if (message.embed) {
+      const embed = new EmbedBuilder();
+      if (message.embed.title) embed.setTitle(message.embed.title);
+      if (message.embed.description) embed.setDescription(message.embed.description);
+      if (message.embed.color !== undefined) embed.setColor(message.embed.color);
+      if (message.embed.fields) {
+        for (const f of message.embed.fields) embed.addFields(f);
+      }
+      if (message.embed.footer) embed.setFooter({ text: message.embed.footer });
+
+      const payload: Record<string, unknown> = { embeds: [embed] };
+      if (message.buttons?.length) {
+        const row = new ActionRowBuilder<ButtonBuilder>();
+        for (const btn of message.buttons) {
+          row.addComponents(
+            new ButtonBuilder()
+              .setCustomId(btn.callbackData)
+              .setLabel(btn.label)
+              .setStyle(btn.style === 'danger' ? ButtonStyle.Danger : ButtonStyle.Primary)
+          );
+        }
+        payload.components = [row];
+      }
+
+      try {
+        const sent = await channel.send(payload as any) as Message;
+        return { messageId: sent.id, success: true };
+      } catch (err) {
+        throw classifyError('discord', err);
+      }
     }
 
     const content = message.text ?? message.html ?? '';
@@ -144,6 +179,19 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
     const existing = await channel.messages.fetch(messageId);
     if (!existing) return;
+
+    if (message.embed) {
+      const embed = new EmbedBuilder();
+      if (message.embed.title) embed.setTitle(message.embed.title);
+      if (message.embed.description) embed.setDescription(message.embed.description);
+      if (message.embed.color !== undefined) embed.setColor(message.embed.color);
+      if (message.embed.fields) {
+        for (const f of message.embed.fields) embed.addFields(f);
+      }
+      if (message.embed.footer) embed.setFooter({ text: message.embed.footer });
+      await existing.edit({ embeds: [embed] });
+      return;
+    }
 
     const content = message.text ?? message.html ?? '';
     const truncated = content.length > 2000 ? content.slice(0, 2000) : content;

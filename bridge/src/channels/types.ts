@@ -26,6 +26,14 @@ export interface OutboundMessage {
   replyToMessageId?: string;
   /** Feishu: override receive_id_type (default 'chat_id', can be 'open_id' for P2P) */
   receiveIdType?: string;
+  /** Discord embed for rich formatting */
+  embed?: {
+    title?: string;
+    description?: string;
+    color?: number;
+    fields?: Array<{ name: string; value: string; inline?: boolean }>;
+    footer?: string;
+  };
 }
 
 export interface SendResult {
