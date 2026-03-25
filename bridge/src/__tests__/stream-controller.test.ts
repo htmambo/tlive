@@ -107,7 +107,7 @@ describe('StreamController', () => {
     expect(content).toContain('📊');
     expect(content).not.toContain('Grep');
     expect(content).not.toContain('some text');
-    expect(content).not.toContain('──────');
+    expect(content).not.toContain('━━━━');
     ctrl.dispose();
   });
 

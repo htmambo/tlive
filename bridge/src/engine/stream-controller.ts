@@ -113,7 +113,7 @@ export class StreamController {
 
     if (this.toolHeaders.length > 0 && this.verboseLevel > 0) {
       parts.push(this.toolHeaders.join(' → '));
-      parts.push('──────────────────');
+      parts.push('━━━━━━━━━━━━━━━━━━');
     }
 
     if (this.buffer && this.verboseLevel > 0) {
