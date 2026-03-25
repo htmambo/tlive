@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { formatPermissionCard } from '../formatting/permission.js';
+import { formatNotification } from '../formatting/notification.js';
 
 describe('formatPermissionCard', () => {
   const baseData = {
@@ -55,5 +56,53 @@ describe('formatPermissionCard', () => {
     const noUrl = { ...baseData, terminalUrl: undefined };
     const msg = formatPermissionCard(noUrl, 'telegram');
     expect(msg.html).not.toContain('<a href=');
+  });
+});
+
+describe('formatNotification', () => {
+  it('stop: telegram returns HTML with blockquote summary', () => {
+    const msg = formatNotification(
+      { type: 'stop', title: 'Task Complete', summary: 'Fixed the auth bug', terminalUrl: 'https://x.com/t' },
+      'telegram'
+    );
+    expect(msg.html).toContain('<b>Task Complete</b>');
+    expect(msg.html).toContain('<blockquote>');
+    expect(msg.html).toContain('Fixed the auth bug');
+    expect(msg.html).toContain('<a href="https://x.com/t">');
+  });
+
+  it('stop: discord returns green embed', () => {
+    const msg = formatNotification(
+      { type: 'stop', title: 'Task Complete', summary: 'Done' },
+      'discord'
+    );
+    expect(msg.embed).toBeDefined();
+    expect(msg.embed!.color).toBe(0x00CC66);
+    expect(msg.embed!.title).toContain('Task Complete');
+  });
+
+  it('idle_prompt: discord returns blue embed', () => {
+    const msg = formatNotification(
+      { type: 'idle_prompt', title: 'Waiting for Input' },
+      'discord'
+    );
+    expect(msg.embed!.color).toBe(0x3399FF);
+  });
+
+  it('feishu: returns card data with header', () => {
+    const msg = formatNotification(
+      { type: 'stop', title: 'Task Complete', summary: 'Done' },
+      'feishu'
+    );
+    expect(msg.feishuHeader).toEqual({ template: 'green', title: expect.stringContaining('Task Complete') });
+    expect(msg.text).toContain('Done');
+  });
+
+  it('truncates long summaries', () => {
+    const msg = formatNotification(
+      { type: 'stop', title: 'Done', summary: 'x'.repeat(4000) },
+      'telegram'
+    );
+    expect(msg.html!.length).toBeLessThan(4000);
   });
 });
