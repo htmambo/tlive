@@ -144,44 +144,28 @@ export class FeishuAdapter extends BaseChannelAdapter {
             replyToMessageId: msg.parent_id || msg.root_id || undefined,
           });
         } else if (msg.message_type === 'image') {
-          console.log(`[feishu] Received image message: ${msg.message_id}`);
           try {
             const imageKey = JSON.parse(msg.content).image_key;
-            console.log(`[feishu] Downloading image: key=${imageKey}`);
-            // Try messageResource.get first (openclaw pattern), fall back to im.image.get
             let buf: Buffer | null = null;
             try {
-              const resp = await this.client!.im.messageResource.get({
+              buf = await readFeishuBuffer(await this.client!.im.messageResource.get({
                 path: { message_id: msg.message_id, file_key: imageKey },
                 params: { type: 'image' },
-              });
-              console.log(`[feishu] messageResource resp type: ${typeof resp}, keys: ${resp ? Object.keys(resp as any).join(',') : 'null'}`);
-              buf = await readFeishuBuffer(resp);
-            } catch (e1) {
-              console.log(`[feishu] messageResource.get failed, trying im.image.get:`, JSON.stringify({ msg: (e1 as any)?.msg, code: (e1 as any)?.code, status: (e1 as any)?.response?.status, message: (e1 as any)?.message }).slice(0, 500));
+              }));
+            } catch {
               try {
-                const resp2 = await this.client!.im.image.get({
+                buf = await readFeishuBuffer(await this.client!.im.image.get({
                   path: { image_key: imageKey },
-                });
-                console.log(`[feishu] im.image.get response type: ${typeof resp2}, keys: ${resp2 ? Object.keys(resp2 as any).join(',') : 'null'}`);
-                buf = await readFeishuBuffer(resp2);
-                console.log(`[feishu] im.image.get buffer: ${buf?.length ?? 'null'} bytes`);
-              } catch (e2) {
-                console.warn(`[feishu] im.image.get also failed:`, JSON.stringify({ msg: (e2 as any)?.msg, code: (e2 as any)?.code, message: (e2 as any)?.message }).slice(0, 500));
-              }
+                }));
+              } catch { /* both methods failed */ }
             }
             if (buf && buf.length > 0 && buf.length <= 10_000_000) {
-              console.log(`[feishu] Image downloaded: ${buf.length} bytes`);
               attachments.push({
                 type: 'image', name: 'image.png',
                 mimeType: 'image/png', base64Data: buf.toString('base64'),
               });
-            } else {
-              console.warn(`[feishu] Image download returned empty or oversized: ${buf?.length ?? 0} bytes`);
             }
-          } catch (err) {
-            console.warn(`[feishu] Image download failed:`, (err as any)?.msg || (err as any)?.message || err);
-          }
+          } catch { /* skip undownloadable images */ }
 
           if (attachments.length > 0) {
             this.messageQueue.push({
@@ -242,7 +226,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
         const userId = event?.operator?.user_id || event?.operator?.open_id || '';
         const chatId = event?.context?.chat_id || '';
         const messageId = event?.context?.open_message_id || '';
-        console.log(`[feishu] Card action: ${action} from ${userId}`);
         this.messageQueue.push({
           channelType: 'feishu',
           chatId,
@@ -276,8 +259,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
   }
 
   private buildCard(text: string, buttons?: OutboundMessage['buttons'], header?: { template: string; title: string }): string {
-    if (header) console.log(`[feishu] buildCard with header: ${header.template} "${header.title}"`);
-    else console.log(`[feishu] buildCard without header`);
     const elements: FeishuCardElement[] = [
       { tag: 'markdown', content: text },
     ];
@@ -302,12 +283,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
       } as any);
     }
 
-    const cardJson = buildFeishuCard({
+    return buildFeishuCard({
       header: header as any,
       elements,
     });
-    console.log(`[feishu] card JSON: ${cardJson.slice(0, 500)}`);
-    return cardJson;
   }
 
   async send(message: OutboundMessage): Promise<SendResult> {
@@ -420,9 +399,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
             data,
           }) as FeishuCreateMessageResult;
         } else {
-          const errAny = createErr as any;
-          const respData = errAny?.response?.data || errAny?.data;
-          console.error(`[feishu] send failed: idType=${idType}, chatId=${message.chatId}`, JSON.stringify({ code: errAny?.code, msg: errAny?.msg, message: errAny?.message, respCode: respData?.code, respMsg: respData?.msg }).slice(0, 800));
           throw createErr;
         }
       }
@@ -472,7 +448,6 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   async addReaction(_chatId: string, messageId: string, emoji: string): Promise<void> {
     if (!this.client) return;
-    console.log(`[feishu] addReaction: messageId=${messageId}, emoji=${emoji}`);
     try {
       // Remove existing reaction first (if any)
       await this.removeReaction(_chatId, messageId);
@@ -482,9 +457,7 @@ export class FeishuAdapter extends BaseChannelAdapter {
       });
       const reactionId = (result as any)?.data?.reaction_id;
       if (reactionId) this.reactionIds.set(messageId, reactionId);
-    } catch (err) {
-      console.warn(`[feishu] addReaction failed:`, (err as any)?.msg || (err as any)?.message || err);
-    }
+    } catch { /* non-fatal */ }
   }
 
   async removeReaction(_chatId: string, messageId: string): Promise<void> {

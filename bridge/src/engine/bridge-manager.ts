@@ -175,12 +175,14 @@ export class BridgeManager {
     let summary: string | undefined;
 
     if (hookType === 'stop') {
-      title = 'Task Complete';
       type = 'stop';
       const raw = (hook.last_assistant_message || hook.last_output || '').trim();
       summary = raw ? (raw.length > 3000 ? raw.slice(0, 2997) + '...' : raw) : undefined;
+      // Use first line of summary as title, fall back to generic
+      const firstLine = summary?.split('\n')[0]?.slice(0, 50);
+      title = firstLine || 'Done';
     } else if (hook.notification_type === 'idle_prompt') {
-      title = hook.message || 'Claude is waiting for input...';
+      title = hook.message || 'Waiting for input...';
       type = 'idle_prompt';
     } else {
       title = hook.message || 'Notification';

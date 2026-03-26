@@ -273,7 +273,6 @@ async function main() {
               buttons,
               feishuHeader: { template: 'orange', title: '🔐 Permission Required' },
             };
-            logger.info(`Sending permission card to ${adapter.channelType}: chatId=${target.chatId}, receiveIdType=${target.receiveIdType}`);
             const sendResult = await adapter.send(outMsg);
             // Track for reply routing and permission resolution
             if (perm.session_id) {
