@@ -14,7 +14,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 
 /** Format a permission card for IM display — human-readable, not raw JSON */
 function formatPermissionCard(toolName: string, input: unknown): string {
-  const parts: string[] = ['🔐 [Local] Permission Required'];
+  const parts: string[] = ['🔐 Permission Required'];
   const data = (typeof input === 'string' ? (() => { try { return JSON.parse(input); } catch { return {}; } })() : input) as Record<string, unknown>;
 
   switch (toolName) {
@@ -271,7 +271,7 @@ async function main() {
               receiveIdType: target.receiveIdType,
               text: text + feishuHint,
               buttons,
-              feishuHeader: { template: 'orange', title: '🔐 Permission Required' },
+              feishuHeader: { template: 'orange', title: '🔐 Terminal · Permission Required' },
             };
             const sendResult = await adapter.send(outMsg);
             // Track for reply routing and permission resolution
