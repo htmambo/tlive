@@ -280,6 +280,7 @@ async function main() {
               manager.trackHookMessage(sendResult.messageId, perm.session_id);
             }
             manager.trackPermissionMessage(sendResult.messageId, perm.id, perm.session_id || '', adapter.channelType);
+            manager.storeHookPermissionText(perm.id, text);
           } catch (err) {
             logger.warn(`Failed to send permission to ${adapter.channelType}: ${err}`);
           }

@@ -42,6 +42,8 @@ export class BridgeManager {
   private lastChatId = new Map<string, string>();
   /** Deduplicate hook permission resolutions */
   private resolvedHookIds = new Set<string>();
+  /** Store original permission card text for card updates after approval */
+  private hookPermissionTexts = new Map<string, string>();
   /** Pending image attachments waiting for a text message to merge with (key: channelType:chatId) */
   private pendingAttachments = new Map<string, { attachments: import('../channels/types.js').FileAttachment[]; timestamp: number }>();
   private hookMessages = new Map<string, { sessionId: string; timestamp: number }>();
@@ -147,6 +149,11 @@ export class BridgeManager {
     for (const [id, entry] of this.permissionMessages) {
       if (Date.now() - entry.timestamp > 24 * 60 * 60 * 1000) this.permissionMessages.delete(id);
     }
+  }
+
+  /** Store original permission card text for later card update */
+  storeHookPermissionText(hookId: string, text: string): void {
+    this.hookPermissionTexts.set(hookId, text);
   }
 
   /** Parse text as a permission decision */
@@ -360,14 +367,17 @@ export class BridgeManager {
               deny: '❌ Denied',
             };
             const label = labels[decision] || '✅ Allowed';
-            // Update the original card — remove buttons, show result
+            // Rebuild original permission text + disabled buttons showing result
+            const permEntry = this.permissionMessages.get(msg.messageId);
+            const originalText = this.hookPermissionTexts.get(hookId) || '';
             await adapter.editMessage(msg.chatId, msg.messageId, {
               chatId: msg.chatId,
-              text: label,
+              text: originalText + `\n\n${label}`,
               feishuHeader: {
                 template: decision === 'deny' ? 'red' : 'green',
                 title: label,
               },
+              // No buttons — they're removed after approval
             });
             // Use messageId from edited card for reply tracking
             const confirmResult = { messageId: msg.messageId, success: true };
