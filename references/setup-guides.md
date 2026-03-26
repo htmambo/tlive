@@ -72,9 +72,20 @@ Enter comma-separated IDs to restrict access. Leave empty to allow anyone who ca
 ### Required Permissions
 
 Add these permissions in **Permissions & Scopes**:
+
+**Basic (required):**
 - `im:message` — Send and receive messages
 - `im:message:send_as_bot` — Send messages as bot
 - `im:chat:readonly` — Read chat info
+
+**Reactions (recommended):**
+- `im:message.reaction:write` — Add/remove emoji reactions (typing indicator)
+
+**Rich cards (recommended):**
+- `cardkit:card:write` — CardKit streaming cards (smooth real-time rendering)
+
+**Media (optional, for image/file sending):**
+- `im:resource` — Upload images and files
 
 ### Event Subscriptions
 

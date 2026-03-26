@@ -45,7 +45,9 @@ Your app needs permission to send and receive messages.
 
 1. In the left sidebar, go to **Permissions & Scopes**
 2. Click **Add Scopes** (or **Add Permissions**)
-3. Search for and add these three permissions:
+3. Search for and add these permissions:
+
+**Required:**
 
 | Permission | Description |
 |---|---|
@@ -53,11 +55,24 @@ Your app needs permission to send and receive messages.
 | `im:message:send_as_bot` | Send messages as a bot |
 | `im:chat:readonly` | Read basic chat info |
 
-4. After adding all three, make sure they appear in your permission list
+**Recommended (enhanced experience):**
 
-<!-- TODO: screenshot of Permissions & Scopes page with the three permissions added -->
+| Permission | Description |
+|---|---|
+| `im:message.reaction:write` | Emoji reactions (typing indicator) |
+| `cardkit:card:write` | CardKit streaming cards (smoother real-time rendering) |
 
-> **Important:** All three permissions are required. Missing any one of them will cause errors when tlive tries to send or receive messages.
+**Optional:**
+
+| Permission | Description |
+|---|---|
+| `im:resource` | Upload images and files |
+
+4. After adding permissions, make sure they appear in your permission list
+
+<!-- TODO: screenshot of Permissions & Scopes page -->
+
+> **Important:** The three basic permissions are required. Recommended permissions provide a better interaction experience (typing indicator, streaming cards).
 
 ## Step 4: Configure Event Subscriptions
 
@@ -167,7 +182,7 @@ All environment variable names, permissions, and event names are identical.
 - Check that `TL_FS_APP_ID` and `TL_FS_APP_SECRET` are correct (no extra spaces)
 
 **Permission denied errors**
-- Confirm all three required permissions (`im:message`, `im:message:send_as_bot`, `im:chat:readonly`) are added in Step 3
+- Confirm required permissions (`im:message`, `im:message:send_as_bot`, `im:chat:readonly`) are added in Step 3; also recommended: `im:message.reaction:write` and `cardkit:card:write`
 - Permissions take effect after the app is published and approved — if you added permissions later, create a new version and get it re-approved
 
 **"Invalid App ID" or "Invalid App Secret"**

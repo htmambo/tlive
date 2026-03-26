@@ -45,7 +45,9 @@
 
 1. 在左侧菜单中，点击 **权限管理**
 2. 点击 **添加权限**
-3. 搜索并添加以下三个权限：
+3. 搜索并添加以下权限：
+
+**必需权限：**
 
 | 权限标识 | 说明 |
 |---|---|
@@ -53,11 +55,24 @@
 | `im:message:send_as_bot` | 以机器人身份发消息 |
 | `im:chat:readonly` | 读取群组基本信息 |
 
-4. 添加完成后，确认这三个权限都出现在权限列表中
+**推荐权限（增强体验）：**
 
-<!-- TODO: 权限管理页面的截图，显示已添加的三个权限 -->
+| 权限标识 | 说明 |
+|---|---|
+| `im:message.reaction:write` | 表情回复（输入状态指示） |
+| `cardkit:card:write` | CardKit 流式卡片（更流畅的实时渲染） |
 
-> **重要：** 三个权限缺一不可。少配任何一个，tlive 在收发消息时都会报错。
+**可选权限：**
+
+| 权限标识 | 说明 |
+|---|---|
+| `im:resource` | 上传图片和文件 |
+
+4. 添加完成后，确认权限都出现在权限列表中
+
+<!-- TODO: 权限管理页面的截图 -->
+
+> **重要：** 前三个基础权限缺一不可。推荐权限用于更好的交互体验（输入指示器、流式卡片）。
 
 ## 第四步：配置事件订阅
 
@@ -167,7 +182,7 @@ TL_FS_ALLOWED_USERS=ou_xxxxxxxxxxxxxxxx
 - 检查 `TL_FS_APP_ID` 和 `TL_FS_APP_SECRET` 是否正确（注意没有多余空格）
 
 **权限不足错误**
-- 确认第三步中的三个权限（`im:message`、`im:message:send_as_bot`、`im:chat:readonly`）都已添加
+- 确认第三步中的基础权限（`im:message`、`im:message:send_as_bot`、`im:chat:readonly`）都已添加，推荐同时开通 `im:message.reaction:write` 和 `cardkit:card:write`
 - 权限在应用发布审批后才生效——如果是后来新增的权限，需要创建新版本并重新审批
 
 **「无效的 App ID」或「无效的 App Secret」**
