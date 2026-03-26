@@ -114,6 +114,41 @@ export class TelegramAdapter extends BaseChannelAdapter {
   async send(message: OutboundMessage): Promise<SendResult> {
     if (!this.bot) throw new Error('Telegram bot not started');
 
+    // Media sending
+    if (message.media) {
+      try {
+        const media = message.media;
+        let source: string | Buffer;
+        if (media.buffer) {
+          source = media.buffer;
+        } else if (media.url?.startsWith('data:')) {
+          // Data URI -> Buffer
+          const base64 = media.url.split(',')[1];
+          source = Buffer.from(base64, 'base64');
+        } else if (media.url) {
+          source = media.url;
+        } else {
+          throw new Error('No media source');
+        }
+
+        if (media.type === 'image') {
+          const result = await this.bot!.sendPhoto(message.chatId, source as any, {
+            caption: message.text,
+            ...(message.html ? { parse_mode: 'HTML' as const, caption: message.html } : {}),
+          });
+          return { messageId: String(result.message_id), success: true };
+        } else {
+          const result = await this.bot!.sendDocument(message.chatId, source as any, {
+            caption: message.text,
+          }, { filename: media.filename || 'file', contentType: media.mimeType });
+          return { messageId: String(result.message_id), success: true };
+        }
+      } catch (err) {
+        // If media send fails, fall through to text-only
+        if (!message.text && !message.html) throw classifyError('telegram', err);
+      }
+    }
+
     const options: TelegramBot.SendMessageOptions = {};
     if (message.html) options.parse_mode = 'HTML';
     if (message.buttons?.length) {
@@ -136,8 +171,20 @@ export class TelegramAdapter extends BaseChannelAdapter {
       for (let i = 0; i < chunks.length; i++) {
         const opts: TelegramBot.SendMessageOptions = { ...options };
         if (i < chunks.length - 1) delete opts.reply_markup;
-        const result = await this.bot.sendMessage(message.chatId, chunks[i], opts);
-        lastMessageId = String(result.message_id);
+        try {
+          const result = await this.bot.sendMessage(message.chatId, chunks[i], opts);
+          lastMessageId = String(result.message_id);
+        } catch (sendErr) {
+          // Parse-mode fallback: retry without HTML if formatting fails
+          if (opts.parse_mode && (sendErr as any)?.response?.statusCode === 400) {
+            const plainOpts = { ...opts };
+            delete plainOpts.parse_mode;
+            const result = await this.bot.sendMessage(message.chatId, chunks[i], plainOpts);
+            lastMessageId = String(result.message_id);
+          } else {
+            throw sendErr;
+          }
+        }
       }
     } catch (err) {
       throw classifyError('telegram', err);
@@ -166,6 +213,33 @@ export class TelegramAdapter extends BaseChannelAdapter {
       await this.bot?.sendChatAction(chatId, 'typing');
     } catch {
       // Non-critical; swallow errors
+    }
+  }
+
+  async addReaction(_chatId: string, messageId: string, emoji: string): Promise<void> {
+    if (!this.bot) return;
+    try {
+      // Use setMessageReaction API (Bot API 7.2+)
+      await (this.bot as any).setMessageReaction(
+        _chatId,
+        parseInt(messageId, 10),
+        { reaction: [{ type: 'emoji', emoji }] }
+      );
+    } catch {
+      // Non-fatal: reaction API may not be available (older bot API)
+    }
+  }
+
+  async removeReaction(_chatId: string, messageId: string): Promise<void> {
+    if (!this.bot) return;
+    try {
+      await (this.bot as any).setMessageReaction(
+        _chatId,
+        parseInt(messageId, 10),
+        { reaction: [] }
+      );
+    } catch {
+      // Non-fatal
     }
   }
 

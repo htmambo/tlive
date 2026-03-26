@@ -14,7 +14,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 
 /** Format a permission card for IM display — human-readable, not raw JSON */
 function formatPermissionCard(toolName: string, input: unknown): string {
-  const parts: string[] = ['🔐 [Local] Permission Required'];
+  const parts: string[] = ['🔐 Permission Required'];
   const data = (typeof input === 'string' ? (() => { try { return JSON.parse(input); } catch { return {}; } })() : input) as Record<string, unknown>;
 
   switch (toolName) {
@@ -91,7 +91,7 @@ function getHookTarget(channelType: string, config: ReturnType<typeof loadConfig
   if (channelType === 'discord') {
     return { chatId: config.discord.allowedChannels[0] || '', receiveIdType: undefined };
   }
-  // Feishu: send to user directly (P2P) if allowedUsers configured
+  // Feishu: try user_id P2P first, fall back to lastChatId
   const userId = config.feishu.allowedUsers[0];
   if (userId) {
     const idType = userId.startsWith('ou_') ? 'open_id' : 'user_id';
@@ -264,19 +264,22 @@ async function main() {
           if (!target.chatId) continue;
 
           try {
-            // Feishu WSClient doesn't support card action callbacks — use text-based approval
-            const useTextApproval = adapter.channelType === 'feishu';
-            const sendResult = await adapter.send({
+            // Feishu: add text fallback hint alongside buttons (in case card action not configured)
+            const feishuHint = adapter.channelType === 'feishu' ? '\n\n💬 或回复 **allow** / **deny**' : '';
+            const outMsg = {
               chatId: target.chatId,
               receiveIdType: target.receiveIdType,
-              text: useTextApproval ? text + '\n\n💬 回复 **allow** 或 **deny**' : text,
-              buttons: useTextApproval ? undefined : buttons,
-            });
+              text: text + feishuHint,
+              buttons,
+              feishuHeader: { template: 'orange', title: '🔐 Terminal · Permission Required' },
+            };
+            const sendResult = await adapter.send(outMsg);
             // Track for reply routing and permission resolution
             if (perm.session_id) {
               manager.trackHookMessage(sendResult.messageId, perm.session_id);
             }
             manager.trackPermissionMessage(sendResult.messageId, perm.id, perm.session_id || '', adapter.channelType);
+            manager.storeHookPermissionText(perm.id, text);
           } catch (err) {
             logger.warn(`Failed to send permission to ${adapter.channelType}: ${err}`);
           }

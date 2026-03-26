@@ -4,18 +4,75 @@ import type { InboundMessage, OutboundMessage, SendResult, FileAttachment } from
 import { loadConfig } from '../config.js';
 import { classifyError } from './errors.js';
 import { markdownToFeishu } from '../markdown/feishu.js';
+import { buildFeishuCard } from '../formatting/feishu-card.js';
+import { FeishuStreamingSession } from './feishu-streaming.js';
+import { Readable } from 'node:stream';
 
-/** Feishu interactive card element (markdown block, action block, etc.) */
-interface FeishuCardElement {
-  tag: string;
-  content?: string;
-  actions?: Array<{
-    tag: string;
-    text: { tag: string; content: string };
-    type: string;
-    value: Record<string, string>;
-  }>;
+/**
+ * Read a Feishu SDK response into a Buffer.
+ * The SDK returns different formats depending on version/endpoint:
+ * Buffer, ArrayBuffer, async iterable, or nested in .data
+ * (Inspired by openclaw's readFeishuResponseBuffer)
+ */
+async function readFeishuBuffer(resp: unknown): Promise<Buffer | null> {
+  if (!resp) return null;
+  const r = resp as any;
+  // Direct Buffer
+  if (Buffer.isBuffer(r)) return r;
+  if (r instanceof ArrayBuffer) return Buffer.from(r);
+  // Nested in .data
+  if (r.data && Buffer.isBuffer(r.data)) return r.data;
+  if (r.data instanceof ArrayBuffer) return Buffer.from(r.data);
+  // getReadableStream() — SDK v1.30+ returns this for file downloads
+  if (typeof r.getReadableStream === 'function') {
+    const stream = r.getReadableStream();
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  }
+  // writeFile() — SDK fallback: write to temp file then read back
+  if (typeof r.writeFile === 'function') {
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const { readFile, unlink } = await import('node:fs/promises');
+    const tmp = join(tmpdir(), `tlive-feishu-${Date.now()}.tmp`);
+    try {
+      await r.writeFile(tmp);
+      return await readFile(tmp);
+    } finally {
+      await unlink(tmp).catch(() => {});
+    }
+  }
+  // Async iterable (stream) on .data
+  if (typeof r.data?.[Symbol.asyncIterator] === 'function') {
+    const chunks: Buffer[] = [];
+    for await (const chunk of r.data as AsyncIterable<Buffer>) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  }
+  if (typeof r[Symbol.asyncIterator] === 'function') {
+    const chunks: Buffer[] = [];
+    for await (const chunk of r as AsyncIterable<Buffer>) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  }
+  // Readable stream on .data
+  if (typeof r.data?.read === 'function') {
+    const chunks: Buffer[] = [];
+    for await (const chunk of r.data as Readable) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  }
+  return null;
 }
+
+/** Feishu interactive card element – now imported from shared types */
+type FeishuCardElement = import('../formatting/types.js').FeishuCardElement;
 
 /** Shape of the Feishu message.create API response */
 interface FeishuCreateMessageResult {
@@ -89,22 +146,24 @@ export class FeishuAdapter extends BaseChannelAdapter {
         } else if (msg.message_type === 'image') {
           try {
             const imageKey = JSON.parse(msg.content).image_key;
-            const resp = await this.client!.im.v1.messageResource.get({
-              path: { message_id: msg.message_id, file_key: imageKey },
-              params: { type: 'image' },
-            });
-            if (resp?.data) {
-              const chunks: Buffer[] = [];
-              for await (const chunk of resp.data as AsyncIterable<Buffer>) {
-                chunks.push(chunk);
-              }
-              const buf = Buffer.concat(chunks);
-              if (buf.length <= 10_000_000) {
-                attachments.push({
-                  type: 'image', name: 'image.png',
-                  mimeType: 'image/png', base64Data: buf.toString('base64'),
-                });
-              }
+            let buf: Buffer | null = null;
+            try {
+              buf = await readFeishuBuffer(await this.client!.im.messageResource.get({
+                path: { message_id: msg.message_id, file_key: imageKey },
+                params: { type: 'image' },
+              }));
+            } catch {
+              try {
+                buf = await readFeishuBuffer(await this.client!.im.image.get({
+                  path: { image_key: imageKey },
+                }));
+              } catch { /* both methods failed */ }
+            }
+            if (buf && buf.length > 0 && buf.length <= 10_000_000) {
+              attachments.push({
+                type: 'image', name: 'image.png',
+                mimeType: 'image/png', base64Data: buf.toString('base64'),
+              });
             }
           } catch { /* skip undownloadable images */ }
 
@@ -158,9 +217,27 @@ export class FeishuAdapter extends BaseChannelAdapter {
       },
     });
 
+    // Register card action handler for button callbacks (schema 2.0 cards)
+    eventDispatcher.register({
+      'card.action.trigger': async (data: unknown) => {
+        const event = data as { operator?: { user_id?: string; open_id?: string }; action?: { value?: Record<string, string> }; context?: { chat_id?: string; open_message_id?: string } };
+        const action = event?.action?.value?.action;
+        if (!action) return;
+        const userId = event?.operator?.user_id || event?.operator?.open_id || '';
+        const chatId = event?.context?.chat_id || '';
+        const messageId = event?.context?.open_message_id || '';
+        this.messageQueue.push({
+          channelType: 'feishu',
+          chatId,
+          userId,
+          text: '',
+          callbackData: action,
+          messageId,
+        });
+      },
+    } as any);
+
     // Use WebSocket long connection (no public callback URL needed)
-    // Note: CardActionHandler is NOT supported via WSClient — Feishu uses
-    // text-based permission approval instead of card action callbacks.
     this.wsClient = new WSClient({
       appId: this.config.appId,
       appSecret: this.config.appSecret,
@@ -181,25 +258,33 @@ export class FeishuAdapter extends BaseChannelAdapter {
     return this.messageQueue.shift() ?? null;
   }
 
-  private buildCard(text: string, buttons?: OutboundMessage['buttons']): string {
+  private buildCard(text: string, buttons?: OutboundMessage['buttons'], header?: { template: string; title: string }): string {
     const elements: FeishuCardElement[] = [
       { tag: 'markdown', content: text },
     ];
 
     if (buttons?.length) {
+      // Schema 2.0: buttons as direct elements in a column_set (horizontal layout)
+      const buttonColumns = buttons.map(btn => ({
+        tag: 'column' as const,
+        width: 'auto' as const,
+        vertical_align: 'top' as const,
+        elements: [{
+          tag: 'button' as const,
+          text: { tag: 'plain_text' as const, content: btn.label },
+          type: btn.style === 'danger' ? 'danger' as const : btn.style === 'primary' ? 'primary_filled' as const : 'default' as const,
+          behaviors: [{ type: 'callback' as const, value: { action: btn.callbackData } }],
+        }],
+      }));
       elements.push({
-        tag: 'action',
-        actions: buttons.map(btn => ({
-          tag: 'button',
-          text: { tag: 'plain_text', content: btn.label },
-          type: btn.style === 'danger' ? 'danger' : 'primary',
-          value: { action: btn.callbackData },
-        })),
-      });
+        tag: 'column_set',
+        flex_mode: 'flow',
+        columns: buttonColumns,
+      } as any);
     }
 
-    return JSON.stringify({
-      config: { wide_screen_mode: true },
+    return buildFeishuCard({
+      header: header as any,
       elements,
     });
   }
@@ -207,22 +292,118 @@ export class FeishuAdapter extends BaseChannelAdapter {
   async send(message: OutboundMessage): Promise<SendResult> {
     if (!this.client) throw new Error('Feishu client not started');
 
-    const raw = markdownToFeishu(message.text ?? message.html ?? '');
+    // Prefer raw text (markdown) over HTML — schema 2.0 cards render markdown natively
+    const raw = message.text
+      ? message.text
+      : markdownToFeishu(message.html ?? '');
+
+    // Media sending
+    if (message.media) {
+      try {
+        const media = message.media;
+        let buffer: Buffer;
+        if (media.buffer) {
+          buffer = media.buffer;
+        } else if (media.url?.startsWith('data:')) {
+          const base64 = media.url.split(',')[1];
+          buffer = Buffer.from(base64, 'base64');
+        } else if (media.url) {
+          // Fetch URL to buffer
+          const resp = await fetch(media.url);
+          buffer = Buffer.from(await resp.arrayBuffer());
+        } else {
+          throw new Error('No media source');
+        }
+
+        if (media.type === 'image') {
+          // Upload image first, then send
+          // Pass Buffer directly — Readable.from() causes form-data issues
+          // See: https://github.com/larksuite/node-sdk/issues/121
+          const uploadResult = await this.client.im.image.create({
+            data: {
+              image_type: 'message',
+              image: buffer as any,
+            },
+          });
+          const imageKey = (uploadResult as any)?.data?.image_key;
+          if (imageKey) {
+            const idType = message.receiveIdType || 'chat_id';
+            const result = await this.client.im.message.create({
+              params: { receive_id_type: idType },
+              data: {
+                receive_id: message.chatId,
+                msg_type: 'image',
+                content: JSON.stringify({ image_key: imageKey }),
+              },
+            });
+            const messageId = (result as any)?.data?.message_id ?? '';
+            return { messageId: String(messageId), success: true };
+          }
+        } else {
+          // Upload file then send
+          // Pass Buffer directly — Readable.from() causes form-data issues
+          const uploadResult = await this.client.im.file.create({
+            data: {
+              file_type: 'stream',
+              file_name: media.filename || 'file',
+              file: buffer as any,
+            },
+          });
+          const fileKey = (uploadResult as any)?.data?.file_key;
+          if (fileKey) {
+            const idType = message.receiveIdType || 'chat_id';
+            const result = await this.client.im.message.create({
+              params: { receive_id_type: idType },
+              data: {
+                receive_id: message.chatId,
+                msg_type: 'file',
+                content: JSON.stringify({ file_key: fileKey }),
+              },
+            });
+            const messageId = (result as any)?.data?.message_id ?? '';
+            return { messageId: String(messageId), success: true };
+          }
+        }
+      } catch (err) {
+        // Fall through to text-only if media fails
+        if (!message.text && !message.html) throw classifyError('feishu', err);
+      }
+    }
 
     try {
-      // Always use interactive card format so editMessage (patch) works for streaming updates
       const idType = message.receiveIdType || 'chat_id';
-      const result = await this.client.im.message.create({
-        params: { receive_id_type: idType },
-        data: {
-          receive_id: message.chatId,
-          msg_type: 'interactive',
-          content: this.buildCard(raw, message.buttons),
-          ...(message.replyToMessageId ? { root_id: message.replyToMessageId } : {}),
-        },
-      });
+      // If feishuElements provided, build card directly from structured elements
+      const cardContent = message.feishuElements
+        ? buildFeishuCard({ header: message.feishuHeader as any, elements: message.feishuElements as any })
+        : this.buildCard(raw, message.buttons, message.feishuHeader);
+      const data: Record<string, unknown> = {
+        receive_id: message.chatId,
+        msg_type: 'interactive',
+        content: cardContent,
+      };
+      if (message.replyToMessageId) data.root_id = message.replyToMessageId;
 
-      const messageId = (result as FeishuCreateMessageResult)?.data?.message_id ?? '';
+      let result: FeishuCreateMessageResult;
+      try {
+        result = await this.client.im.message.create({
+          params: { receive_id_type: idType },
+          data,
+        }) as FeishuCreateMessageResult;
+      } catch (createErr) {
+        // Reply target withdrawn/deleted — retry without root_id
+        const code = (createErr as any)?.code;
+        if (message.replyToMessageId && (code === 230011 || code === 231003)) {
+          delete data.root_id;
+          result = await this.client.im.message.create({
+            params: { receive_id_type: idType },
+            data,
+          }) as FeishuCreateMessageResult;
+        } else {
+          throw createErr;
+        }
+      }
+
+      const messageId = result?.data?.message_id ?? '';
       return { messageId: String(messageId), success: true };
     } catch (err) {
       throw classifyError('feishu', err);
@@ -231,13 +412,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
 
   async editMessage(_chatId: string, messageId: string, message: OutboundMessage): Promise<void> {
     if (!this.client) return;
-    const text = markdownToFeishu(message.text ?? message.html ?? '');
+    const text = message.text
+      ? message.text
+      : markdownToFeishu(message.html ?? '');
 
     try {
       await this.client.im.message.patch({
         path: { message_id: messageId },
         data: {
-          content: this.buildCard(text, message.buttons),
+          content: this.buildCard(text, message.buttons, message.feishuHeader),
         },
       });
     } catch {
@@ -245,8 +428,50 @@ export class FeishuAdapter extends BaseChannelAdapter {
     }
   }
 
+  createStreamingSession(chatId: string, receiveIdType?: string, replyToMessageId?: string, header?: { template: string; title: string }): FeishuStreamingSession | null {
+    if (!this.client) return null;
+    return new FeishuStreamingSession({
+      client: this.client,
+      chatId,
+      receiveIdType,
+      replyToMessageId,
+      header,
+    });
+  }
+
   async sendTyping(_chatId: string): Promise<void> {
-    // Feishu has no native typing API; streaming card updates serve this purpose
+    // Feishu has no native typing API; reactions are used instead
+    // (handled by bridge-manager via addReaction)
+  }
+
+  private reactionIds = new Map<string, string>();
+
+  async addReaction(_chatId: string, messageId: string, emoji: string): Promise<void> {
+    if (!this.client) return;
+    try {
+      // Remove existing reaction first (if any)
+      await this.removeReaction(_chatId, messageId);
+      const result = await this.client.im.messageReaction.create({
+        path: { message_id: messageId },
+        data: { reaction_type: { emoji_type: emoji } },
+      });
+      const reactionId = (result as any)?.data?.reaction_id;
+      if (reactionId) this.reactionIds.set(messageId, reactionId);
+    } catch { /* non-fatal */ }
+  }
+
+  async removeReaction(_chatId: string, messageId: string): Promise<void> {
+    if (!this.client) return;
+    const reactionId = this.reactionIds.get(messageId);
+    if (!reactionId) return;
+    try {
+      await this.client.im.messageReaction.delete({
+        path: { message_id: messageId, reaction_id: reactionId },
+      });
+      this.reactionIds.delete(messageId);
+    } catch {
+      // Non-fatal
+    }
   }
 
   validateConfig(): string | null {

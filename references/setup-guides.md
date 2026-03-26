@@ -71,16 +71,33 @@ Enter comma-separated IDs to restrict access. Leave empty to allow anyone who ca
 
 ### Required Permissions
 
-Add these permissions in **Permissions & Scopes**:
-- `im:message` — Send and receive messages
-- `im:message:send_as_bot` — Send messages as bot
-- `im:chat:readonly` — Read chat info
+In **Permissions & Scopes**, click **Batch import** and paste:
+
+```json
+{
+  "scopes": {
+    "tenant": [
+      "cardkit:card:read",
+      "cardkit:card:write",
+      "im:chat:readonly",
+      "im:message",
+      "im:message.group_at_msg:readonly",
+      "im:message.p2p_msg:readonly",
+      "im:message:readonly",
+      "im:message:send_as_bot",
+      "im:resource"
+    ]
+  }
+}
+```
 
 ### Event Subscriptions
 
 After starting the bridge, configure events:
 1. Go to **Events & Callbacks**
-2. Add event: `im.message.receive_v1`
+2. Add events:
+   - `im.message.receive_v1` — receive messages
+   - `card.action.trigger` — card button interactions (permission approval)
 3. Set callback mode: **Long Connection (WebSocket)**
 4. Publish the app version and get admin approval
 

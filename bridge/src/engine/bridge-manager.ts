@@ -1,5 +1,5 @@
 import { BaseChannelAdapter, createAdapter } from '../channels/base.js';
-import type { InboundMessage } from '../channels/types.js';
+import type { InboundMessage, OutboundMessage } from '../channels/types.js';
 import { ConversationEngine } from './conversation.js';
 import { ChannelRouter } from './router.js';
 import { PermissionBroker } from '../permissions/broker.js';
@@ -9,6 +9,7 @@ import { getBridgeContext } from '../context.js';
 import { loadConfig } from '../config.js';
 import { markdownToTelegram } from '../markdown/index.js';
 import { StreamController, type VerboseLevel } from './stream-controller.js';
+import type { FeishuStreamingSession } from '../channels/feishu-streaming.js';
 import { CostTracker } from './cost-tracker.js';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
@@ -39,6 +40,12 @@ export class BridgeManager {
   private verboseLevels = new Map<string, VerboseLevel>();
   private lastActive = new Map<string, number>();
   private lastChatId = new Map<string, string>();
+  /** Deduplicate hook permission resolutions */
+  private resolvedHookIds = new Set<string>();
+  /** Store original permission card text for card updates after approval */
+  private hookPermissionTexts = new Map<string, string>();
+  /** Pending image attachments waiting for a text message to merge with (key: channelType:chatId) */
+  private pendingAttachments = new Map<string, { attachments: import('../channels/types.js').FileAttachment[]; timestamp: number }>();
   private hookMessages = new Map<string, { sessionId: string; timestamp: number }>();
   private permissionMessages = new Map<string, { permissionId: string; sessionId: string; timestamp: number }>();
   private latestPermission = new Map<string, { permissionId: string; sessionId: string; messageId: string }>();
@@ -144,6 +151,11 @@ export class BridgeManager {
     }
   }
 
+  /** Store original permission card text for later card update */
+  storeHookPermissionText(hookId: string, text: string): void {
+    this.hookPermissionTexts.set(hookId, text);
+  }
+
   /** Parse text as a permission decision */
   private parsePermissionText(text: string): string | null {
     const t = text.trim().toLowerCase();
@@ -155,37 +167,44 @@ export class BridgeManager {
 
   /** Send a hook notification to IM with [Local] prefix and track for reply routing */
   async sendHookNotification(adapter: BaseChannelAdapter, chatId: string, hook: HookNotificationData, receiveIdType?: string): Promise<void> {
+    const { formatNotification } = await import('../formatting/index.js');
     const hookType = hook.tlive_hook_type || '';
-    const parts: string[] = [];
+
+    let title: string;
+    let type: 'stop' | 'idle_prompt' | 'generic';
+    let summary: string | undefined;
 
     if (hookType === 'stop') {
-      parts.push('🖥 [Local] ✅ Task complete');
-
-      // Use last_assistant_message from Claude Code Stop hook (primary),
-      // fall back to last_output enriched by Go Core from PTY buffer
-      const summary = (hook.last_assistant_message || hook.last_output || '').trim();
-      if (summary) {
-        const truncated = summary.length > 3000 ? summary.slice(0, 2997) + '...' : summary;
-        parts.push('', `> ${truncated.replace(/\n/g, '\n> ')}`);
-      }
+      type = 'stop';
+      const raw = (hook.last_assistant_message || hook.last_output || '').trim();
+      summary = raw ? (raw.length > 3000 ? raw.slice(0, 2997) + '...' : raw) : undefined;
+      title = 'Terminal';
     } else if (hook.notification_type === 'idle_prompt') {
-      parts.push(`🖥 [Local] ${hook.message || 'Claude is waiting for input...'}`);
+      title = 'Terminal · ' + (hook.message || 'Waiting for input...');
+      type = 'idle_prompt';
     } else {
-      parts.push(`🖥 [Local] ${hook.message || 'Notification'}`);
+      title = hook.message || 'Notification';
+      type = 'generic';
     }
 
-    // Add web terminal link if Go Core is available
+    let terminalUrl: string | undefined;
     if (this.coreAvailable && hook.tlive_session_id) {
       const config = loadConfig();
       const baseUrl = config.publicUrl || `http://localhost:${config.port || 8080}`;
-      const url = `${baseUrl}/terminal.html?id=${hook.tlive_session_id}&token=${this.token}`;
-      parts.push('', `🔗 [Open Terminal](${url})`);
+      terminalUrl = `${baseUrl}/terminal.html?id=${hook.tlive_session_id}&token=${this.token}`;
     }
 
-    const raw = parts.join('\n');
-    const outMsg = adapter.channelType === 'telegram'
-      ? { chatId, html: markdownToTelegram(raw) }
-      : { chatId, text: raw, receiveIdType };
+    const formatted = formatNotification({ type, title, summary, terminalUrl }, adapter.channelType as any);
+
+    const outMsg: import('../channels/types.js').OutboundMessage = {
+      chatId,
+      text: formatted.text,
+      html: formatted.html,
+      embed: formatted.embed,
+      feishuHeader: formatted.feishuHeader,
+      feishuElements: (formatted as any).feishuElements,
+      receiveIdType,
+    };
     const result = await adapter.send(outMsg);
     this.trackHookMessage(result.messageId, hook.tlive_session_id || '');
   }
@@ -215,6 +234,27 @@ export class BridgeManager {
         mkdirSync(join(homedir(), '.tlive', 'runtime'), { recursive: true });
         writeFileSync(this.chatIdFile, JSON.stringify(Object.fromEntries(this.lastChatId)));
       } catch { /* non-fatal */ }
+    }
+
+    // Image buffering: cache image-only messages, merge into next text message
+    const attachKey = `${msg.channelType}:${msg.chatId}`;
+    if (msg.attachments?.length && !msg.text && !msg.callbackData) {
+      // Image-only message: buffer attachments and wait for text
+      this.pendingAttachments.set(attachKey, {
+        attachments: msg.attachments,
+        timestamp: Date.now(),
+      });
+      console.log(`[${msg.channelType}] Buffered ${msg.attachments.length} attachment(s), waiting for text`);
+      return true;
+    }
+    // Merge pending attachments into current text message
+    if (msg.text && !msg.callbackData) {
+      const pending = this.pendingAttachments.get(attachKey);
+      if (pending && Date.now() - pending.timestamp < 60_000) {
+        msg.attachments = [...(msg.attachments || []), ...pending.attachments];
+        console.log(`[${msg.channelType}] Merged ${pending.attachments.length} buffered attachment(s) with text`);
+      }
+      this.pendingAttachments.delete(attachKey);
     }
 
     // Text-based permission resolution (Feishu only — Telegram/Discord use card action callbacks)
@@ -258,17 +298,34 @@ export class BridgeManager {
     }
 
     // Reply routing: quote-reply to a hook message → send to PTY stdin
-    if (msg.text && msg.replyToMessageId && this.hookMessages.has(msg.replyToMessageId)) {
+    if ((msg.text || msg.attachments?.length) && msg.replyToMessageId && this.hookMessages.has(msg.replyToMessageId)) {
       const entry = this.hookMessages.get(msg.replyToMessageId)!;
       if (entry.sessionId && this.coreAvailable) {
         try {
+          // If images attached, save as temp files and include paths in the text
+          let inputText = msg.text || '';
+          if (msg.attachments?.length) {
+            const { writeFileSync, mkdirSync } = await import('node:fs');
+            const { join } = await import('node:path');
+            const { tmpdir } = await import('node:os');
+            const imgDir = join(tmpdir(), 'tlive-images');
+            mkdirSync(imgDir, { recursive: true });
+            for (const att of msg.attachments) {
+              if (att.type === 'image') {
+                const ext = att.mimeType === 'image/png' ? '.png' : '.jpg';
+                const filePath = join(imgDir, `img-${Date.now()}${ext}`);
+                writeFileSync(filePath, Buffer.from(att.base64Data, 'base64'));
+                inputText = inputText ? `${inputText}\n${filePath}` : filePath;
+              }
+            }
+          }
           await fetch(`${this.coreUrl}/api/sessions/${entry.sessionId}/input`, {
             method: 'POST',
             headers: {
               Authorization: `Bearer ${this.token}`,
               'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ text: msg.text + '\r' }),
+            body: JSON.stringify({ text: inputText + '\r' }),
             signal: AbortSignal.timeout(5000),
           });
           await adapter.send({ chatId: msg.chatId, text: '✓ Sent to local session' });
@@ -290,6 +347,10 @@ export class BridgeManager {
         const hookId = parts[2];
         const sessionId = parts[3] || '';
 
+        // Deduplicate: skip if already resolved
+        if (this.resolvedHookIds.has(hookId)) return true;
+        this.resolvedHookIds.add(hookId);
+
         if (this.coreAvailable) {
           try {
             await fetch(`${this.coreUrl}/api/hooks/permission/${hookId}/resolve`, {
@@ -306,10 +367,21 @@ export class BridgeManager {
               allow_always: '📌 Always Allowed',
               deny: '❌ Denied',
             };
-            const confirmResult = await adapter.send({
+            const label = labels[decision] || '✅ Allowed';
+            // Rebuild original permission text + disabled buttons showing result
+            const permEntry = this.permissionMessages.get(msg.messageId);
+            const originalText = this.hookPermissionTexts.get(hookId) || '';
+            await adapter.editMessage(msg.chatId, msg.messageId, {
               chatId: msg.chatId,
-              text: labels[decision] || '✅ Allowed',
+              text: originalText + `\n\n${label}`,
+              feishuHeader: {
+                template: decision === 'deny' ? 'red' : 'green',
+                title: label,
+              },
+              // No buttons — they're removed after approval
             });
+            // Use messageId from edited card for reply tracking
+            const confirmResult = { messageId: msg.messageId, success: true };
             // Track confirmation message for reply routing
             if (sessionId) {
               this.trackHookMessage(confirmResult.messageId, sessionId);
@@ -359,15 +431,61 @@ export class BridgeManager {
     const costTracker = new CostTracker();
     costTracker.start();
 
+    // Add processing reaction
+    const reactionEmojis: Record<string, { processing: string; done: string; error: string }> = {
+      telegram: { processing: '\u{1F914}', done: '\u{1F44D}', error: '\u{1F631}' },
+      feishu: { processing: 'Typing', done: 'OK', error: 'FACEPALM' },
+      discord: { processing: '\u{1F914}', done: '\u{1F44D}', error: '\u{274C}' },
+    };
+    const reactions = reactionEmojis[adapter.channelType] || reactionEmojis.telegram;
+    adapter.addReaction(msg.chatId, msg.messageId, reactions.processing).catch(() => {});
+
+    // Feishu: use CardKit streaming session for smoother rendering
+    let feishuSession: FeishuStreamingSession | null = null;
+    if (adapter.channelType === 'feishu' && 'createStreamingSession' in adapter) {
+      feishuSession = (adapter as any).createStreamingSession(msg.chatId, msg.receiveIdType);
+    }
+
     const platformLimits: Record<string, number> = { telegram: 4096, discord: 2000, feishu: 30000 };
     const stream = new StreamController({
       verboseLevel,
       platformLimit: platformLimits[adapter.channelType] ?? 4096,
       flushCallback: async (content, isEdit) => {
-        // Convert markdown to platform-specific format
-        const outMsg = adapter.channelType === 'telegram'
-          ? { chatId: msg.chatId, html: markdownToTelegram(content) }
-          : { chatId: msg.chatId, text: content };
+        // Feishu: use CardKit streaming
+        if (feishuSession) {
+          if (!isEdit) {
+            // First flush: start streaming session
+            try {
+              const messageId = await feishuSession.start(content);
+              clearInterval(typingInterval);
+              return messageId;
+            } catch {
+              // Fallback: streaming API not available, disable and use normal send
+              feishuSession = null;
+            }
+          } else {
+            // Subsequent flushes: stream update
+            feishuSession.update(content).catch(() => {});
+            return;
+          }
+        }
+
+        // Non-streaming path (Telegram, Discord, Feishu fallback)
+        let outMsg: OutboundMessage;
+        if (adapter.channelType === 'telegram') {
+          let styled = content;
+          styled = styled.replace(/^((?:📖|✏️|📝|🖥️|🔍|📂|🤖|🌐|🔧)[^\n]*)\n(━+)/m, '<i>$1</i>\n$2');
+          styled = styled.replace(/(📊[^\n]+)$/m, '<code>$1</code>');
+          outMsg = { chatId: msg.chatId, html: markdownToTelegram(styled) };
+        } else if (adapter.channelType === 'discord') {
+          let styled = content;
+          styled = styled.replace(/^((?:📖|✏️|📝|🖥️|🔍|📂|🤖|🌐|🔧)[^\n]*)\n(━+)/m, '*$1*\n$2');
+          styled = styled.replace(/(📊[^\n]+)$/m, '`$1`');
+          outMsg = { chatId: msg.chatId, text: styled };
+        } else {
+          // Feishu: pass raw markdown with card header for styled rendering
+          outMsg = { chatId: msg.chatId, text: content, feishuHeader: { template: 'blue', title: '💬 Claude' } };
+        }
 
         if (!isEdit) {
           const result = await adapter.send(outMsg);
@@ -397,7 +515,11 @@ export class BridgeManager {
         },
         onError: (err) => stream.onError(err),
         onPermissionRequest: async (req) => {
-          await this.broker.forwardPermissionRequest(req, msg.chatId, [adapter]);
+          await this.broker.forwardPermissionRequest(
+            req,
+            (channelType) => this.getLastChatId(channelType) || msg.chatId,
+            this.getAdapters()
+          );
         },
       });
 
@@ -414,9 +536,19 @@ export class BridgeManager {
           platformLimit: platformLimits[adapter.channelType] ?? 4096,
         });
       }
+      // Success: change to done reaction
+      adapter.addReaction(msg.chatId, msg.messageId, reactions.done).catch(() => {});
+    } catch (err) {
+      // Error: change to error reaction
+      adapter.addReaction(msg.chatId, msg.messageId, reactions.error).catch(() => {});
+      throw err;
     } finally {
       clearInterval(typingInterval);
       stream.dispose();
+      // Close Feishu streaming card
+      if (feishuSession) {
+        feishuSession.close().catch(() => {});
+      }
     }
 
     return true;
@@ -430,17 +562,42 @@ export class BridgeManager {
       case '/status': {
         const ctx = getBridgeContext();
         const healthy = (ctx.core as { isHealthy?: () => boolean }).isHealthy?.() ?? false;
-        await adapter.send({
-          chatId: msg.chatId,
-          text: `TermLive Status\nCore: ${healthy ? '● connected' : '○ disconnected'}\nAdapters: ${this.adapters.size} active`,
-        });
+        const coreStatus = healthy ? '● connected' : '○ disconnected';
+        const channelList = Array.from(this.adapters.keys()).join(', ') || 'none';
+        const statusText = [
+          '📡 TLive Status',
+          '',
+          `Bridge:     ● running`,
+          `Core:       ${coreStatus}`,
+          `Channels:   ${channelList}`,
+        ].join('\n');
+
+        if (adapter.channelType === 'telegram') {
+          await adapter.send({ chatId: msg.chatId, html: `<pre>${statusText}</pre>` });
+        } else if (adapter.channelType === 'discord') {
+          await adapter.send({ chatId: msg.chatId, text: `\`\`\`\n${statusText}\n\`\`\`` });
+        } else {
+          await adapter.send({
+            chatId: msg.chatId,
+            text: statusText,
+            feishuHeader: { template: 'blue', title: '📡 TLive Status' },
+          });
+        }
         return true;
       }
       case '/new': {
         const newSessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         await this.router.rebind(msg.channelType, msg.chatId, newSessionId);
         this.clearLastActive(msg.channelType, msg.chatId);
-        await adapter.send({ chatId: msg.chatId, text: '🆕 New session started.' });
+        if (adapter.channelType === 'feishu') {
+          await adapter.send({
+            chatId: msg.chatId,
+            text: 'Session cleared. Send a message to begin.',
+            feishuHeader: { template: 'green', title: '🆕 New Session' },
+          });
+        } else {
+          await adapter.send({ chatId: msg.chatId, text: '🆕 New session started.' });
+        }
         return true;
       }
       case '/verbose': {
@@ -481,18 +638,16 @@ export class BridgeManager {
           return true;
         }
 
-        // Sort by creation date (newest first) and limit to 10
         const sorted = allSessions
           .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
           .slice(0, 10);
 
-        const lines: string[] = ['📋 Sessions:'];
+        const lines: string[] = [];
         for (let i = 0; i < sorted.length; i++) {
           const s = sorted[i];
           const isCurrent = s.id === currentSessionId;
           const marker = isCurrent ? ' ◀' : '';
           const date = new Date(s.createdAt).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-          // Get first user message as preview
           const msgs = await store.getMessages(s.id);
           const firstUser = msgs.find(m => m.role === 'user');
           const preview = firstUser
@@ -500,8 +655,20 @@ export class BridgeManager {
             : '(empty)';
           lines.push(`${i + 1}. ${date} — ${preview}${marker}`);
         }
-        lines.push('', 'Use /session <n> to switch');
-        await adapter.send({ chatId: msg.chatId, text: lines.join('\n') });
+
+        const footer = '\nUse /session <n> to switch';
+
+        if (adapter.channelType === 'telegram') {
+          await adapter.send({ chatId: msg.chatId, html: `<b>📋 Sessions</b>\n\n${lines.join('\n')}${footer}` });
+        } else if (adapter.channelType === 'discord') {
+          await adapter.send({ chatId: msg.chatId, text: `**📋 Sessions**\n${lines.join('\n')}${footer}` });
+        } else {
+          await adapter.send({
+            chatId: msg.chatId,
+            text: `${lines.join('\n')}${footer}`,
+            feishuHeader: { template: 'blue', title: '📋 Sessions' },
+          });
+        }
         return true;
       }
       case '/session': {
@@ -539,24 +706,36 @@ export class BridgeManager {
         return true;
       }
       case '/help': {
-        await adapter.send({
-          chatId: msg.chatId,
-          text: [
-            'TLive IM Commands:',
-            '',
-            '/new              New conversation',
-            '/sessions         List recent sessions',
-            '/session <n>      Switch to session #n',
-            '/verbose 0|1|2    Detail level',
-            '  0 = quiet (result only)',
-            '  1 = normal (tools + streaming)',
-            '  2 = detailed (tools + input summary)',
-            '/hooks pause      Auto-allow, no notifications',
-            '/hooks resume     Resume IM approval',
-            '/status           Bridge + hooks status',
-            '/help             This message',
-          ].join('\n'),
-        });
+        const helpLines = [
+          '/new              New conversation',
+          '/sessions         List recent sessions',
+          '/session <n>      Switch to session #n',
+          '/verbose 0|1|2    Detail level',
+          '  0 = quiet (result only)',
+          '  1 = normal (tools + streaming)',
+          '  2 = detailed (tools + input summary)',
+          '/hooks pause      Auto-allow, no notifications',
+          '/hooks resume     Resume IM approval',
+          '/status           Bridge + hooks status',
+          '/help             This message',
+        ];
+
+        if (adapter.channelType === 'telegram') {
+          const htmlLines = helpLines.map(line => {
+            if (line.startsWith('  ')) return line; // indent lines
+            const [cmd, ...desc] = line.split(/\s{2,}/);
+            return desc.length ? `<code>${cmd}</code>  ${desc.join(' ')}` : line;
+          });
+          await adapter.send({ chatId: msg.chatId, html: `<b>TLive Commands</b>\n\n${htmlLines.join('\n')}` });
+        } else if (adapter.channelType === 'discord') {
+          await adapter.send({ chatId: msg.chatId, text: `**TLive Commands**\n\`\`\`\n${helpLines.join('\n')}\n\`\`\`` });
+        } else {
+          await adapter.send({
+            chatId: msg.chatId,
+            text: helpLines.join('\n'),
+            feishuHeader: { template: 'indigo', title: '❓ TLive Commands' },
+          });
+        }
         return true;
       }
       default:

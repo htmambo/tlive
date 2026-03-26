@@ -44,20 +44,43 @@
 应用需要权限才能收发消息。
 
 1. 在左侧菜单中，点击 **权限管理**
-2. 点击 **添加权限**
-3. 搜索并添加以下三个权限：
+2. 点击 **批量开通**，粘贴以下 JSON 一键导入所有需要的权限：
 
-| 权限标识 | 说明 |
-|---|---|
-| `im:message` | 收发消息 |
-| `im:message:send_as_bot` | 以机器人身份发消息 |
-| `im:chat:readonly` | 读取群组基本信息 |
+```json
+{
+  "scopes": {
+    "tenant": [
+      "cardkit:card:read",
+      "cardkit:card:write",
+      "im:chat:readonly",
+      "im:message",
+      "im:message.group_at_msg:readonly",
+      "im:message.p2p_msg:readonly",
+      "im:message:readonly",
+      "im:message:send_as_bot",
+      "im:resource"
+    ]
+  }
+}
+```
 
-4. 添加完成后，确认这三个权限都出现在权限列表中
+**权限说明：**
 
-<!-- TODO: 权限管理页面的截图，显示已添加的三个权限 -->
+| 权限标识 | 说明 | 必要性 |
+|---|---|---|
+| `im:message` | 收发消息 | 必需 |
+| `im:message:send_as_bot` | 以机器人身份发消息 | 必需 |
+| `im:chat:readonly` | 读取群组基本信息 | 必需 |
+| `im:message:readonly` | 读取消息内容 | 必需 |
+| `im:message.p2p_msg:readonly` | 读取私聊消息 | 必需 |
+| `im:message.group_at_msg:readonly` | 读取群聊 @机器人 消息 | 推荐 |
+| `cardkit:card:read` | 读取卡片信息 | 推荐 |
+| `cardkit:card:write` | CardKit 流式卡片 | 推荐 |
+| `im:resource` | 上传图片和文件 | 可选 |
 
-> **重要：** 三个权限缺一不可。少配任何一个，tlive 在收发消息时都会报错。
+3. 确认权限都出现在权限列表中
+
+> **提示：** 使用批量导入方式可一次性开通所有权限，无需逐个搜索。
 
 ## 第四步：配置事件订阅
 
@@ -65,7 +88,9 @@
 
 1. 在左侧菜单中，点击 **事件与回调**
 2. 在 **事件订阅** 区域，点击 **添加事件**
-3. 搜索 `im.message.receive_v1` 并添加
+3. 添加以下事件：
+   - `im.message.receive_v1`（接收消息）
+   - `card.action.trigger`（卡片按钮交互回调）
 4. 设置 **回调方式**：
    - 选择 **长连接（WebSocket）**
    - **不要**选择 HTTP 回调——tlive 使用 WebSocket 模式，不需要你配置公网地址
@@ -163,11 +188,11 @@ TL_FS_ALLOWED_USERS=ou_xxxxxxxxxxxxxxxx
 
 **收不到事件 / 机器人没有响应**
 - 确认第四步中选择了 **长连接（WebSocket）**，而不是 HTTP 回调
-- 确认已添加 `im.message.receive_v1` 事件
+- 确认已添加 `im.message.receive_v1` 和 `card.action.trigger` 事件
 - 检查 `TL_FS_APP_ID` 和 `TL_FS_APP_SECRET` 是否正确（注意没有多余空格）
 
 **权限不足错误**
-- 确认第三步中的三个权限（`im:message`、`im:message:send_as_bot`、`im:chat:readonly`）都已添加
+- 确认第三步中通过批量导入开通的权限都已出现在权限列表中
 - 权限在应用发布审批后才生效——如果是后来新增的权限，需要创建新版本并重新审批
 
 **「无效的 App ID」或「无效的 App Secret」**

@@ -44,20 +44,43 @@ This guide walks you through creating a Feishu (or Lark) custom app and connecti
 Your app needs permission to send and receive messages.
 
 1. In the left sidebar, go to **Permissions & Scopes**
-2. Click **Add Scopes** (or **Add Permissions**)
-3. Search for and add these three permissions:
+2. Click **Batch import**, then paste the following JSON to add all required permissions at once:
 
-| Permission | Description |
-|---|---|
-| `im:message` | Send and receive messages |
-| `im:message:send_as_bot` | Send messages as a bot |
-| `im:chat:readonly` | Read basic chat info |
+```json
+{
+  "scopes": {
+    "tenant": [
+      "cardkit:card:read",
+      "cardkit:card:write",
+      "im:chat:readonly",
+      "im:message",
+      "im:message.group_at_msg:readonly",
+      "im:message.p2p_msg:readonly",
+      "im:message:readonly",
+      "im:message:send_as_bot",
+      "im:resource"
+    ]
+  }
+}
+```
 
-4. After adding all three, make sure they appear in your permission list
+**Permission details:**
 
-<!-- TODO: screenshot of Permissions & Scopes page with the three permissions added -->
+| Permission | Description | Necessity |
+|---|---|---|
+| `im:message` | Send and receive messages | Required |
+| `im:message:send_as_bot` | Send messages as a bot | Required |
+| `im:chat:readonly` | Read basic chat info | Required |
+| `im:message:readonly` | Read message content | Required |
+| `im:message.p2p_msg:readonly` | Read P2P messages | Required |
+| `im:message.group_at_msg:readonly` | Read group @bot messages | Recommended |
+| `cardkit:card:read` | Read card info | Recommended |
+| `cardkit:card:write` | CardKit streaming cards | Recommended |
+| `im:resource` | Upload images and files | Optional |
 
-> **Important:** All three permissions are required. Missing any one of them will cause errors when tlive tries to send or receive messages.
+3. Confirm all permissions appear in the list
+
+> **Tip:** Using batch import adds all permissions at once — no need to search for each one individually.
 
 ## Step 4: Configure Event Subscriptions
 
@@ -65,7 +88,9 @@ This step tells Feishu to notify tlive when someone messages the bot.
 
 1. In the left sidebar, go to **Events & Callbacks**
 2. Under **Event Subscriptions**, click **Add Event**
-3. Search for `im.message.receive_v1` and add it
+3. Add the following events:
+   - `im.message.receive_v1` (receive messages)
+   - `card.action.trigger` (card button interaction callback)
 4. Now set the **callback mode**:
    - Select **Long Connection (WebSocket)**
    - Do **NOT** select HTTP callback — tlive uses WebSocket mode so you don't need to expose a public URL
@@ -163,11 +188,11 @@ All environment variable names, permissions, and event names are identical.
 
 **No events received / bot doesn't respond**
 - Make sure you selected **Long Connection (WebSocket)** in Step 4, not HTTP callback
-- Verify that the `im.message.receive_v1` event is added
+- Verify that both `im.message.receive_v1` and `card.action.trigger` events are added
 - Check that `TL_FS_APP_ID` and `TL_FS_APP_SECRET` are correct (no extra spaces)
 
 **Permission denied errors**
-- Confirm all three required permissions (`im:message`, `im:message:send_as_bot`, `im:chat:readonly`) are added in Step 3
+- Confirm all permissions from the batch import in Step 3 appear in the permission list
 - Permissions take effect after the app is published and approved — if you added permissions later, create a new version and get it re-approved
 
 **"Invalid App ID" or "Invalid App Secret"**
