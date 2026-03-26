@@ -123,6 +123,8 @@ async function downloadGoBinary() {
     writeFileSync(VERSION_FILE, version);
     console.log(`tlive-core ${version} installed to ${dest}`);
   } catch (err) {
+    // Clean up empty/partial file from failed download
+    try { if (existsSync(dest)) unlinkSync(dest); } catch {}
     console.error(`Failed to download tlive-core: ${err.message}`);
     console.error('You can build from source: cd core && go build -o tlive-core ./cmd/tlive/');
     console.error(`Then copy the binary to ${dest}`);
