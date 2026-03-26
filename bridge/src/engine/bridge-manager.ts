@@ -418,7 +418,8 @@ export class BridgeManager {
           styled = styled.replace(/(📊[^\n]+)$/m, '`$1`');
           outMsg = { chatId: msg.chatId, text: styled };
         } else {
-          outMsg = { chatId: msg.chatId, text: content };
+          // Feishu: pass raw markdown with card header for styled rendering
+          outMsg = { chatId: msg.chatId, text: content, feishuHeader: { template: 'blue', title: '💬 Claude' } };
         }
 
         if (!isEdit) {

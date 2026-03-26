@@ -358,8 +358,8 @@ export class FeishuAdapter extends BaseChannelAdapter {
       });
       const reactionId = (result as any)?.data?.reaction_id;
       if (reactionId) this.reactionIds.set(messageId, reactionId);
-    } catch {
-      // Non-fatal: reaction API may not be available in all contexts
+    } catch (err) {
+      console.warn(`[feishu] addReaction failed:`, (err as any)?.msg || (err as any)?.message || err);
     }
   }
 
