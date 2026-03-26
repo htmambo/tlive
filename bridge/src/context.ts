@@ -18,6 +18,7 @@ export interface BridgeContext {
   permissions: PermissionGateway;
   core: CoreClient;
   lifecycle?: LifecycleHooks;
+  defaultWorkdir: string;
 }
 
 const CONTEXT_KEY = '__termlive_bridge_context__';

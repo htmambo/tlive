@@ -46,7 +46,7 @@ interface ProcessMessageResult {
 
 export class ConversationEngine {
   async processMessage(params: ProcessMessageParams): Promise<ProcessMessageResult> {
-    const { store, llm } = getBridgeContext();
+    const { store, llm, defaultWorkdir } = getBridgeContext();
     const lockKey = `session:${params.sessionId}`;
     let fullText = '';
     let usage: { input_tokens: number; output_tokens: number; cost_usd?: number } | undefined;
@@ -66,9 +66,10 @@ export class ConversationEngine {
         timestamp: new Date().toISOString(),
       });
 
-      // 4. Get session info
+      // 4. Get session info — use config's defaultWorkdir instead of process.cwd()
+      //    (bridge daemon CWD may differ from user's project directory)
       const session = await store.getSession(params.sessionId);
-      const workDir = session?.workingDirectory ?? process.cwd();
+      const workDir = session?.workingDirectory ?? defaultWorkdir;
 
       // 5. Stream LLM response (pass images as attachments for vision)
       const stream = llm.streamChat({
@@ -106,7 +107,7 @@ export class ConversationEngine {
               const existing = await store.getSession(params.sessionId);
               await store.saveSession({
                 id: params.sessionId,
-                workingDirectory: existing?.workingDirectory ?? process.cwd(),
+                workingDirectory: existing?.workingDirectory ?? defaultWorkdir,
                 createdAt: existing?.createdAt ?? new Date().toISOString(),
                 sdkSessionId: resultData.session_id,
               });

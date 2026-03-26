@@ -24,8 +24,13 @@ func init() {
 	rootCmd.PersistentFlags().IntVarP(&port, "port", "p", 8080, "Web server port")
 	rootCmd.PersistentFlags().StringVar(&token, "token", "", "Auth token")
 	rootCmd.Flags().StringVar(&publicIP, "ip", "", "Override auto-detected LAN IP address")
-	// Allow unknown flags to pass through to wrapped commands (e.g. tlive claude -r)
-	rootCmd.FParseErrWhitelist = cobra.FParseErrWhitelist{UnknownFlags: true}
+	// Stop parsing flags after the first positional arg (the wrapped command).
+	// This ensures flags like -r, --help, -p intended for the wrapped command
+	// are NOT intercepted by cobra. TLive flags must come before the command:
+	//   tlive --port 9000 claude -r    ✓ (--port is tlive's, -r goes to claude)
+	//   tlive claude --port 9000       ✓ (--port passes through to claude)
+	rootCmd.Flags().SetInterspersed(false)
+	rootCmd.PersistentFlags().SetInterspersed(false)
 	rootCmd.AddCommand(stopCmd)
 }
 

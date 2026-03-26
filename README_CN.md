@@ -175,7 +175,7 @@ tlive hooks resume         # 恢复 Hook（IM 审批）
 ```env
 TL_PORT=8080
 TL_TOKEN=自动生成
-TL_HOST=127.0.0.1
+TL_HOST=0.0.0.0
 TL_PUBLIC_URL=https://example.com
 
 TL_ENABLED_CHANNELS=telegram,discord
@@ -187,6 +187,22 @@ TL_FS_APP_SECRET=...
 ```
 
 完整配置项参见 [config.env.example](config.env.example)。
+
+### 远程访问（frp / 内网穿透）
+
+通过 frpc、Cloudflare Tunnel、ngrok 等从外网访问 web terminal：
+
+1. 将本地 `8080` 端口（或你的 `TL_PORT`）通过隧道转发
+2. 设置 `TL_PUBLIC_URL` 为隧道域名：
+   ```env
+   TL_PUBLIC_URL=https://your-domain.com
+   ```
+   IM 消息中的 web terminal 链接会自动使用该域名，而非局域网 IP。
+
+**安全提示：** 隧道会暴露完整的终端访问权限，务必确保：
+- `TL_TOKEN` 已设置（`tlive setup` 会自动生成）— 所有请求需携带此 token
+- 已配置 IM 用户白名单（`TL_TG_ALLOWED_USERS`、`TL_DC_ALLOWED_USERS` 等）
+- 隧道侧使用 HTTPS（frps / Cloudflare 会自动处理）
 
 ## 架构
 
@@ -270,7 +286,7 @@ tlive/
 
 ## 安全
 
-- 默认绑定 `127.0.0.1`（需要局域网访问显式设置 `--host 0.0.0.0`）
+- 默认绑定 `0.0.0.0`（局域网可访问，手机扫码直连）
 - 自动生成认证 token
 - Hook 超时默认**拒绝**（不是允许）
 - IM 用户白名单

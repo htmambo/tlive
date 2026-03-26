@@ -19,7 +19,7 @@ import (
 type DaemonConfig struct {
 	Port         int
 	Token        string
-	Host         string // default "127.0.0.1"
+	Host         string // default "0.0.0.0"
 	HistoryLimit int
 }
 

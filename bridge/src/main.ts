@@ -184,6 +184,7 @@ async function main() {
     llm,
     permissions: permissions as PermissionGateway,
     core: (coreClient ?? {}) as CoreClient,
+    defaultWorkdir: config.defaultWorkdir,
   });
 
   // Start Bridge Manager with enabled IM adapters
