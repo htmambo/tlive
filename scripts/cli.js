@@ -14,6 +14,12 @@ const DAEMON_SH = join(SCRIPTS_DIR, 'daemon.sh');
 const CORE_BIN = join(homedir(), '.tlive', 'bin', 'tlive-core');
 const PACKAGE_ROOT = join(__dirname, '..');
 
+function getVersion() {
+  try {
+    return JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf-8')).version;
+  } catch { return 'unknown'; }
+}
+
 const HELP_TEXT = `TLive — Terminal live monitoring + IM bridge for AI coding tools
 
 Usage:
@@ -35,6 +41,8 @@ Service Management:
   tlive status               Show Bridge + Web Terminal status
   tlive logs [N]             Show last N log lines (default: 50)
   tlive doctor               Run diagnostic checks
+  tlive update               Update to latest version
+  tlive version              Show version info
 
 Hook Control:
   tlive hooks                Show hook approval status
@@ -49,7 +57,7 @@ In Claude Code (AI-guided):
 `;
 
 // Known subcommands handled by Node.js CLI
-const NODE_COMMANDS = new Set(['setup', 'start', 'stop', 'status', 'logs', 'hooks', 'doctor']);
+const NODE_COMMANDS = new Set(['setup', 'start', 'stop', 'status', 'logs', 'hooks', 'doctor', 'version', 'update']);
 
 // Commands forwarded to Go Core
 const CORE_COMMANDS = new Set(['install']);
@@ -105,6 +113,12 @@ if (!command || command === '--help' || command === '-h' || command === 'help') 
   process.exit(0);
 }
 
+// Version flags
+if (command === '--version' || command === '-v' || command === '-V') {
+  console.log(getVersion());
+  process.exit(0);
+}
+
 switch (command) {
   case 'setup': {
     const setupEntry = join(PACKAGE_ROOT, 'bridge', 'dist', 'setup.mjs');
@@ -152,6 +166,58 @@ switch (command) {
   case 'doctor':
     run(`bash ${join(SCRIPTS_DIR, 'doctor.sh')}`);
     break;
+
+  case 'version': {
+    const ver = getVersion();
+    const coreExists = existsSync(CORE_BIN);
+    let coreVer = 'not installed';
+    if (coreExists) {
+      try {
+        const vFile = join(homedir(), '.tlive', 'bin', '.core-version');
+        coreVer = readFileSync(vFile, 'utf-8').trim();
+      } catch { coreVer = 'unknown'; }
+    }
+    console.log(`tlive          ${ver}`);
+    console.log(`tlive-core     ${coreVer}`);
+    console.log(`node           ${process.version}`);
+    // Check for updates
+    try {
+      const latest = execSync('npm view tlive version', { encoding: 'utf-8', timeout: 5000 }).trim();
+      if (latest !== ver) {
+        console.log(`\nUpdate available: ${ver} → ${latest}`);
+        console.log('Run: tlive update');
+      } else {
+        console.log('\nUp to date.');
+      }
+    } catch {}
+    break;
+  }
+
+  case 'update': {
+    const current = getVersion();
+    console.log(`Current version: ${current}`);
+    console.log('Updating...');
+    try {
+      execSync('npm install -g tlive@latest', { stdio: 'inherit' });
+      const updated = execSync('npm view tlive version', { encoding: 'utf-8', timeout: 5000 }).trim();
+      console.log(`\nUpdated to ${updated || 'latest'}.`);
+      // Restart bridge if running
+      const pidFile = join(homedir(), '.tlive', 'runtime', 'bridge.pid');
+      if (existsSync(pidFile)) {
+        try {
+          const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
+          process.kill(pid, 0);
+          console.log('Restarting bridge...');
+          run(`bash ${DAEMON_SH} stop`);
+          run(`bash ${DAEMON_SH} start`);
+        } catch {}
+      }
+    } catch (err) {
+      console.error(`Update failed: ${err.message || err}`);
+      process.exit(1);
+    }
+    break;
+  }
 
   case 'install': {
     const sub = args[0];
@@ -301,7 +367,7 @@ switch (command) {
 
   default: {
     // Check for typos of known commands before forwarding to Go Core
-    const known = ['setup', 'start', 'stop', 'status', 'logs', 'hooks', 'doctor', 'install', 'help'];
+    const known = ['setup', 'start', 'stop', 'status', 'logs', 'hooks', 'doctor', 'install', 'help', 'version', 'update'];
     const similar = known.find(k => {
       if (Math.abs(k.length - command.length) > 2) return false;
       let diff = 0;
