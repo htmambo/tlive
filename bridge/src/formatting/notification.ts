@@ -67,8 +67,8 @@ export function formatNotification(data: NotificationData, channelType: ChannelT
       if (data.terminalUrl) {
         elements.push({ tag: 'hr' });
         elements.push({
-          tag: 'note',
-          elements: [{ tag: 'plain_text', content: `🔗 Open Terminal: ${data.terminalUrl}` }],
+          tag: 'markdown',
+          content: `<font color='grey'>🔗 [Open Terminal](${data.terminalUrl})</font>`,
         });
       }
       return {
