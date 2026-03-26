@@ -297,7 +297,7 @@ describe('BridgeManager', () => {
 
       const sentMsg = (adapter.send as ReturnType<typeof vi.fn>).mock.calls[0][0];
       const content = sentMsg.html ?? sentMsg.text ?? '';
-      expect(content).toContain('Task Complete');
+      expect(content).toContain('Terminal');
     });
 
     it('formats idle_prompt notification with message', async () => {
