@@ -23,7 +23,29 @@ async function readFeishuBuffer(resp: unknown): Promise<Buffer | null> {
   // Nested in .data
   if (r.data && Buffer.isBuffer(r.data)) return r.data;
   if (r.data instanceof ArrayBuffer) return Buffer.from(r.data);
-  // Async iterable (stream)
+  // getReadableStream() — SDK v1.30+ returns this for file downloads
+  if (typeof r.getReadableStream === 'function') {
+    const stream = r.getReadableStream();
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  }
+  // writeFile() — SDK fallback: write to temp file then read back
+  if (typeof r.writeFile === 'function') {
+    const { join } = await import('node:path');
+    const { tmpdir } = await import('node:os');
+    const { readFile, unlink } = await import('node:fs/promises');
+    const tmp = join(tmpdir(), `tlive-feishu-${Date.now()}.tmp`);
+    try {
+      await r.writeFile(tmp);
+      return await readFile(tmp);
+    } finally {
+      await unlink(tmp).catch(() => {});
+    }
+  }
+  // Async iterable (stream) on .data
   if (typeof r.data?.[Symbol.asyncIterator] === 'function') {
     const chunks: Buffer[] = [];
     for await (const chunk of r.data as AsyncIterable<Buffer>) {
@@ -38,7 +60,7 @@ async function readFeishuBuffer(resp: unknown): Promise<Buffer | null> {
     }
     return Buffer.concat(chunks);
   }
-  // Readable stream
+  // Readable stream on .data
   if (typeof r.data?.read === 'function') {
     const chunks: Buffer[] = [];
     for await (const chunk of r.data as Readable) {
@@ -126,11 +148,28 @@ export class FeishuAdapter extends BaseChannelAdapter {
           try {
             const imageKey = JSON.parse(msg.content).image_key;
             console.log(`[feishu] Downloading image: key=${imageKey}`);
-            // Use im.image.get (like openclaw) — more reliable than messageResource.get
-            const resp = await this.client!.im.image.get({
-              path: { image_key: imageKey },
-            });
-            const buf = await readFeishuBuffer(resp);
+            // Try messageResource.get first (openclaw pattern), fall back to im.image.get
+            let buf: Buffer | null = null;
+            try {
+              const resp = await this.client!.im.messageResource.get({
+                path: { message_id: msg.message_id, file_key: imageKey },
+                params: { type: 'image' },
+              });
+              console.log(`[feishu] messageResource resp type: ${typeof resp}, keys: ${resp ? Object.keys(resp as any).join(',') : 'null'}`);
+              buf = await readFeishuBuffer(resp);
+            } catch (e1) {
+              console.log(`[feishu] messageResource.get failed, trying im.image.get:`, JSON.stringify({ msg: (e1 as any)?.msg, code: (e1 as any)?.code, status: (e1 as any)?.response?.status, message: (e1 as any)?.message }).slice(0, 500));
+              try {
+                const resp2 = await this.client!.im.image.get({
+                  path: { image_key: imageKey },
+                });
+                console.log(`[feishu] im.image.get response type: ${typeof resp2}, keys: ${resp2 ? Object.keys(resp2 as any).join(',') : 'null'}`);
+                buf = await readFeishuBuffer(resp2);
+                console.log(`[feishu] im.image.get buffer: ${buf?.length ?? 'null'} bytes`);
+              } catch (e2) {
+                console.warn(`[feishu] im.image.get also failed:`, JSON.stringify({ msg: (e2 as any)?.msg, code: (e2 as any)?.code, message: (e2 as any)?.message }).slice(0, 500));
+              }
+            }
             if (buf && buf.length > 0 && buf.length <= 10_000_000) {
               console.log(`[feishu] Image downloaded: ${buf.length} bytes`);
               attachments.push({

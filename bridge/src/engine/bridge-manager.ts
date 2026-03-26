@@ -40,6 +40,8 @@ export class BridgeManager {
   private verboseLevels = new Map<string, VerboseLevel>();
   private lastActive = new Map<string, number>();
   private lastChatId = new Map<string, string>();
+  /** Pending image attachments waiting for a text message to merge with (key: channelType:chatId) */
+  private pendingAttachments = new Map<string, { attachments: import('../channels/types.js').FileAttachment[]; timestamp: number }>();
   private hookMessages = new Map<string, { sessionId: string; timestamp: number }>();
   private permissionMessages = new Map<string, { permissionId: string; sessionId: string; timestamp: number }>();
   private latestPermission = new Map<string, { permissionId: string; sessionId: string; messageId: string }>();
@@ -222,6 +224,27 @@ export class BridgeManager {
         mkdirSync(join(homedir(), '.tlive', 'runtime'), { recursive: true });
         writeFileSync(this.chatIdFile, JSON.stringify(Object.fromEntries(this.lastChatId)));
       } catch { /* non-fatal */ }
+    }
+
+    // Image buffering: cache image-only messages, merge into next text message
+    const attachKey = `${msg.channelType}:${msg.chatId}`;
+    if (msg.attachments?.length && !msg.text && !msg.callbackData) {
+      // Image-only message: buffer attachments and wait for text
+      this.pendingAttachments.set(attachKey, {
+        attachments: msg.attachments,
+        timestamp: Date.now(),
+      });
+      console.log(`[${msg.channelType}] Buffered ${msg.attachments.length} attachment(s), waiting for text`);
+      return true;
+    }
+    // Merge pending attachments into current text message
+    if (msg.text && !msg.callbackData) {
+      const pending = this.pendingAttachments.get(attachKey);
+      if (pending && Date.now() - pending.timestamp < 60_000) {
+        msg.attachments = [...(msg.attachments || []), ...pending.attachments];
+        console.log(`[${msg.channelType}] Merged ${pending.attachments.length} buffered attachment(s) with text`);
+      }
+      this.pendingAttachments.delete(attachKey);
     }
 
     // Text-based permission resolution (Feishu only — Telegram/Discord use card action callbacks)

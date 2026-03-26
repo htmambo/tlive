@@ -4,6 +4,9 @@
  */
 
 import { execSync } from 'node:child_process';
+import { writeFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKMessage, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { sseEvent } from './sse-utils.js';
@@ -114,6 +117,26 @@ export class ClaudeSDKProvider implements LLMProvider {
           let stderrBuf = '';
 
           try {
+            // Save image attachments to temp files so Claude Code can read them
+            let prompt = params.prompt;
+            if (params.attachments?.length) {
+              const imgDir = join(tmpdir(), 'tlive-images');
+              mkdirSync(imgDir, { recursive: true });
+              const imagePaths: string[] = [];
+              for (const att of params.attachments) {
+                if (att.type === 'image') {
+                  const ext = att.mimeType === 'image/png' ? '.png' : att.mimeType === 'image/gif' ? '.gif' : '.jpg';
+                  const filePath = join(imgDir, `img-${Date.now()}-${Math.random().toString(36).slice(2, 6)}${ext}`);
+                  writeFileSync(filePath, Buffer.from(att.base64Data, 'base64'));
+                  imagePaths.push(filePath);
+                }
+              }
+              if (imagePaths.length > 0) {
+                const imageRefs = imagePaths.map(p => p).join('\n');
+                prompt = `[User sent ${imagePaths.length} image(s) — read them to see the content]\n${imageRefs}\n\n${prompt}`;
+              }
+            }
+
             const queryOptions: Record<string, unknown> = {
               cwd: params.workingDirectory,
               model: params.model || undefined,
@@ -144,7 +167,7 @@ export class ClaudeSDKProvider implements LLMProvider {
             }
 
             const q = query({
-              prompt: params.prompt as Parameters<typeof query>[0]['prompt'],
+              prompt: prompt as Parameters<typeof query>[0]['prompt'],
               options: queryOptions as Parameters<typeof query>[0]['options'],
             });
 
