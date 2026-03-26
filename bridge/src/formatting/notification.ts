@@ -73,7 +73,7 @@ export function formatNotification(data: NotificationData, channelType: ChannelT
       }
       return {
         text: summary || '',
-        feishuHeader: { template: HEADER_MAP[data.type], title: `${emoji} ${data.title}` },
+        feishuHeader: { template: HEADER_MAP[data.type], title: data.title ? `${emoji} ${data.title}` : emoji },
         feishuElements: elements,
       };
     }

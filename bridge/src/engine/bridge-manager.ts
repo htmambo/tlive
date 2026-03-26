@@ -177,12 +177,8 @@ export class BridgeManager {
     if (hookType === 'stop') {
       type = 'stop';
       const raw = (hook.last_assistant_message || hook.last_output || '').trim();
-      const truncated = raw ? (raw.length > 3000 ? raw.slice(0, 2997) + '...' : raw) : undefined;
-      // Use first line as title, rest as body (avoid duplication)
-      const lines = truncated?.split('\n') || [];
-      const firstLine = lines[0]?.slice(0, 50);
-      title = firstLine || 'Done';
-      summary = lines.length > 1 ? lines.slice(1).join('\n').trim() : undefined;
+      summary = raw ? (raw.length > 3000 ? raw.slice(0, 2997) + '...' : raw) : undefined;
+      title = '';
     } else if (hook.notification_type === 'idle_prompt') {
       title = hook.message || 'Waiting for input...';
       type = 'idle_prompt';
