@@ -70,17 +70,19 @@ Chat with Claude Code from your phone. Start new tasks, get streaming responses 
 ```
 You (Telegram):  "Fix the login bug in auth.ts"
 
-TLive (TG):      🔍 Grep → 📖 Read → ✏️ Edit → 🖥️ Bash
-                  ──────────────────
-                  I found the issue. The token
-                  validation was missing the expiry check...
-
-TLive (TG):      ✅ Task Complete
-                  Fixed auth.ts, all tests pass
-                  📊 12.3k/8.1k tok | $0.08 | 2m 34s
+TLive:  ● Read(auth.ts)
+        ● Grep("validateToken" in src/)
+        ● Edit(auth.ts)
+        ├  Applied
+        ● Bash(npm test)
+        ├  All 42 tests passed
+        ━━━━━━━━━━━━━━━━━━
+        Fixed the login bug. The token validation
+        was missing the expiry check...
+        📊 12.3k/8.1k tok | $0.08 | 2m 34s
 ```
 
-**Verbose levels:** `/verbose 0|1|2` — quiet (final answer only) / normal (tool names) / detailed (tool names + inputs).
+**Verbose levels:** `/verbose 0|1` — quiet (final answer only) / terminal card (tool calls + results + response).
 
 <!-- TODO: Add IM bridge screenshot -->
 <!-- ![IM Bridge](docs/images/im-bridge.png) -->
@@ -101,9 +103,9 @@ Claude Code runs normally in your terminal (no wrapper needed)
   │   │ rm -rf node_modules &&   │
   │   │ npm install              │
   │   └──────────────────────────┘
-  │   [✅ Allow]  [❌ Deny]
+  │   [✅ Yes] [✅ Allow Bash(npm *)] [❌ No]
   │
-  ├── You tap [Allow] → Claude Code continues
+  ├── You tap [Yes] → Claude Code continues
   │
   └── Walk away. Claude keeps working.
       Phone buzzes only when approval needed.
@@ -140,6 +142,9 @@ tlive hooks resume             # Back to IM approval
 | Thread/Topic support | Forum topics | Auto-thread | — |
 | Pairing mode | ✅ | — | — |
 | Webhook mode | ✅ | — | WebSocket |
+| Content redaction | ✅ | ✅ | ✅ |
+| Multi-provider (Claude/Codex) | ✅ | ✅ | ✅ |
+| Graduated permission buttons | ✅ | ✅ | ✅ |
 
 ## Commands
 
@@ -168,11 +173,18 @@ tlive hooks resume         # Resume hooks (IM approval)
 /tlive status              # Check status
 /tlive doctor              # Diagnostics
 
-/verbose 0|1|2             # Set detail level
-/new                       # Start new conversation
-/hooks pause|resume        # Toggle hook approval
-/approve <code>            # Approve Telegram pairing
-/pairings                  # List pending pairings
+/runtime claude|codex          # Switch AI provider
+/perm on|off                   # Permission prompts
+/effort low|medium|high|max    # Thinking depth
+/stop                          # Interrupt execution
+/verbose 0|1                   # Detail level
+/new                           # New conversation
+/sessions                      # List sessions
+/session <n>                   # Switch to session
+/hooks pause|resume            # Toggle hook approval
+/approve <code>                # Approve Telegram pairing
+/pairings                      # List pending pairings
+/help                          # Show all commands
 ```
 
 > **IM Commands:** These slash commands also appear in Telegram's native bot menu automatically.
@@ -248,9 +260,9 @@ To access the web terminal from outside your LAN (e.g. via frpc, Cloudflare Tunn
 ┌─ Node.js Bridge ────────────────────────────────────────────┐
 │                                                              │
 │  ┌─────────────┐  ┌──────────────┐  ┌────────────────────┐ │
-│  │ Agent SDK   │  │ Telegram     │  │ Hook Poll          │ │
-│  │ (new tasks  │  │ Discord      │  │ (forward to IM,    │ │
-│  │  from IM)   │  │ Feishu       │  │  resolve on click) │ │
+│  │Claude/Codex │  │ Telegram     │  │ Hook Poll          │ │
+│  │ SDK         │  │ Discord      │  │ (forward to IM,    │ │
+│  │             │  │ Feishu       │  │  resolve on click) │ │
 │  └─────────────┘  └──────────────┘  └────────────────────┘ │
 └──────────────────────────────────────────────────────────────┘
                            │
@@ -288,9 +300,10 @@ tlive/
 │   └── web/                # Embedded Web UI
 ├── bridge/                 # Node.js → Bridge daemon
 │   └── src/
-│       ├── providers/      # Claude Agent SDK
+│       ├── providers/      # Claude SDK + Codex SDK providers
+│       ├── messages/       # Zod schemas, canonical events, adapters
 │       ├── channels/       # Telegram, Discord, Feishu adapters
-│       ├── engine/         # Conversation engine, bridge manager, streaming
+│       ├── engine/         # Session state, permissions, commands, renderer
 │       ├── permissions/    # Permission gateway + broker
 │       ├── delivery/       # Chunking, retry, rate limiting
 │       └── markdown/       # Per-platform rendering
@@ -310,6 +323,7 @@ tlive/
 - Hook timeout defaults to **deny** (not allow)
 - IM user whitelists per platform (or pairing mode for Telegram)
 - Bot permission probing on startup (warns about missing permissions)
+- Automatic redaction of API keys, tokens, passwords, and private keys in IM messages
 - Secret redaction in logs
 - `chmod 600` on config.env
 - Environment isolation for Claude CLI subprocess

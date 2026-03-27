@@ -2,6 +2,36 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- Terminal-style card display with rolling tool window, tree connectors, and inline permissions
+- Zod-validated canonical event system replacing SSE string pipeline
+- Multi-provider support: Codex (OpenAI) via `/runtime codex` command
+- Graduated permission buttons: "Allow all edits", "Allow Bash(prefix *)", "Allow {tool}"
+- Dynamic session whitelist — approved tools auto-allowed for the session
+- 250ms conditional tool delay buffer — prevents fast tool call flicker
+- Sensitive content redaction — API keys, tokens, passwords, private keys auto-redacted in IM
+- AskUserQuestion support with inline option buttons
+- `/runtime`, `/effort`, `/stop` IM commands
+- `thinking_delta` event kind — Claude's thinking hidden from IM by default
+- Hidden internal tools filtered from display (ToolSearch, TaskCreate, etc.)
+- `parentToolUseId` for subagent nesting tracking
+- `SessionMode` and `ProviderBackend` types for future multi-provider architecture
+
+### Changed
+- `StreamController` replaced by `TerminalCardRenderer` with rolling window
+- `sseEvent()`/`parseSSE()` replaced by Zod `CanonicalEvent` typed stream
+- `BridgeManager` refactored: extracted `SessionStateManager`, `PermissionCoordinator`, `CommandRouter`
+- Permission buttons: Yes/No only → graduated tool-specific options
+- Verbose levels: 0/1/2 → 0/1 (quiet / terminal card)
+
+### Removed
+- `StreamController` class
+- `sse-utils.ts` (SSE string serialization)
+- Verbose level 2 (detailed)
+- "Always" permission button (use `/perm off` instead)
+
 ## [0.2.3] - 2026-03-25
 
 ### Changed

@@ -70,17 +70,19 @@ $ tlive claude --model opus
 ```
 你 (Telegram):    "修复 auth.ts 里的登录 bug"
 
-TLive (TG):       🔍 Grep → 📖 Read → ✏️ Edit → 🖥️ Bash
-                   ──────────────────
-                   我发现了问题。
-                   Token 验证缺少过期检查...
-
-TLive (TG):       ✅ 任务完成
-                   已修复 auth.ts，测试通过
-                   📊 12.3k/8.1k tok | $0.08 | 2m 34s
+TLive:  ● Read(auth.ts)
+        ● Grep("validateToken" in src/)
+        ● Edit(auth.ts)
+        ├  Applied
+        ● Bash(npm test)
+        ├  All 42 tests passed
+        ━━━━━━━━━━━━━━━━━━
+        Fixed the login bug. The token validation
+        was missing the expiry check...
+        📊 12.3k/8.1k tok | $0.08 | 2m 34s
 ```
 
-**详细度控制：** `/verbose 0|1|2` — 安静（仅最终回复）/ 正常（工具名称）/ 详细（工具名称 + 输入参数）。
+**详细度控制：** `/verbose 0|1` — 安静（仅最终回复）/ 终端卡片（工具调用 + 结果 + 回复）。
 
 <!-- TODO: 添加 IM 桥接截图 -->
 <!-- ![IM 桥接](docs/images/im-bridge.png) -->
@@ -101,9 +103,9 @@ TLive (TG):       ✅ 任务完成
   │   │ rm -rf node_modules &&   │
   │   │ npm install              │
   │   └──────────────────────────┘
-  │   [✅ 允许]  [❌ 拒绝]
+  │   [✅ 允许] [✅ 允许 Bash(npm *)] [❌ 拒绝]
   │
-  ├── 你点 [允许] → Claude Code 继续执行
+  ├── 你点 [允许] → Claude Code 继续
   │
   └── 离开电脑。Claude 继续工作。
       只有需要审批时手机才会响。
@@ -135,6 +137,9 @@ tlive hooks resume             # 恢复 IM 审批
 | 工具可视化 | ✅ | ✅ | ✅ |
 | 输入状态 | ✅ | ✅ | — |
 | 权限按钮 | 内联键盘 | Button 组件 | 互动卡片 |
+| 内容脱敏 | ✅ | ✅ | ✅ |
+| 多引擎 (Claude/Codex) | ✅ | ✅ | ✅ |
+| 分级权限按钮 | ✅ | ✅ | ✅ |
 
 ## 命令
 
@@ -163,9 +168,16 @@ tlive hooks resume         # 恢复 Hook（IM 审批）
 /tlive status              # 查看状态
 /tlive doctor              # 诊断
 
-/verbose 0|1|2             # 设置详细度
-/new                       # 开始新对话
-/hooks pause|resume        # 切换 Hook 审批
+/runtime claude|codex          # 切换 AI 引擎
+/perm on|off                   # 权限提示
+/effort low|medium|high|max    # 思考深度
+/stop                          # 中断执行
+/verbose 0|1                   # 详细度
+/new                           # 新对话
+/sessions                      # 列出会话
+/session <n>                   # 切换会话
+/hooks pause|resume            # 切换 Hook 审批
+/help                          # 显示所有命令
 ```
 
 ## 配置
@@ -229,9 +241,9 @@ TL_FS_APP_SECRET=...
 ┌─ Node.js Bridge ────────────────────────────────────────────┐
 │                                                              │
 │  ┌─────────────┐  ┌──────────────┐  ┌────────────────────┐ │
-│  │ Agent SDK   │  │ Telegram     │  │ Hook 轮询          │ │
-│  │ (IM 发起   │  │ Discord      │  │ (转发到 IM,        │ │
-│  │  新任务)    │  │ 飞书         │  │  点击后解析)        │ │
+│  │Claude/Codex │  │ Telegram     │  │ Hook 轮询          │ │
+│  │ SDK         │  │ Discord      │  │ (转发到 IM,        │ │
+│  │             │  │ 飞书         │  │  点击后解析)        │ │
 │  └─────────────┘  └──────────────┘  └────────────────────┘ │
 └──────────────────────────────────────────────────────────────┘
                            │
@@ -269,9 +281,10 @@ tlive/
 │   └── web/                # 内嵌 Web UI
 ├── bridge/                 # Node.js → Bridge 守护进程
 │   └── src/
-│       ├── providers/      # Claude Agent SDK
+│       ├── providers/      # Claude SDK + Codex SDK providers
+│       ├── messages/       # Zod schemas, canonical events, adapters
 │       ├── channels/       # Telegram、Discord、飞书适配器
-│       ├── engine/         # 对话引擎、Bridge 管理器、流式控制
+│       ├── engine/         # 会话状态、权限、命令、渲染器
 │       ├── permissions/    # 权限网关 + 代理
 │       ├── delivery/       # 分块、重试、限速
 │       └── markdown/       # 各平台渲染
@@ -290,6 +303,7 @@ tlive/
 - 自动生成认证 token
 - Hook 超时默认**拒绝**（不是允许）
 - IM 用户白名单
+- IM 消息中自动脱敏 API key、token、密码和私钥
 - 日志自动脱敏
 - 配置文件 `chmod 600`
 - Claude CLI 子进程环境隔离
