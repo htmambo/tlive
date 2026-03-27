@@ -729,15 +729,19 @@ export class BridgeManager {
           this.activeControls.set(chatKey, ctrl);
         },
         onTextDelta: (delta) => renderer.onTextDelta(delta),
-        onToolUse: (event) => {
-          const rendererToolId = renderer.onToolStart(event.name, event.input as Record<string, unknown>);
+        onToolStart: (event) => {
+          const rendererToolId = renderer.onToolStart(event.name, event.input);
           if (event.id) toolIdMap.set(event.id, rendererToolId);
         },
         onToolResult: (event) => {
-          const rendererToolId = toolIdMap.get(event.tool_use_id) ?? event.tool_use_id;
-          renderer.onToolComplete(rendererToolId, event.content, event.is_error);
+          const rendererToolId = toolIdMap.get(event.toolUseId) ?? event.toolUseId;
+          renderer.onToolComplete(rendererToolId, event.content, event.isError);
         },
-        onAgentProgress: (data) => renderer.onAgentProgress(data.description, data.lastTool, data.usage),
+        onAgentStart: (data) => renderer.onAgentStart(data.description),
+        onAgentProgress: (data) => {
+          const usage = data.usage ? { tool_uses: data.usage.toolUses, duration_ms: data.usage.durationMs } : undefined;
+          renderer.onAgentProgress(data.description, data.lastTool, usage);
+        },
         onAgentComplete: (data) => renderer.onAgentComplete(data.summary, data.status as 'completed' | 'failed' | 'stopped'),
         onToolProgress: (data) => {
           renderer.onAgentProgress(`${data.toolName} running...`, undefined, { tool_uses: 0, duration_ms: data.elapsed * 1000 });
@@ -749,11 +753,11 @@ export class BridgeManager {
             renderer.onTextDelta(`\n⚠️ Rate limit: ${Math.round(data.utilization * 100)}% used\n`);
           }
         },
-        onResult: (event) => {
-          if (event.permission_denials?.length) {
-            console.warn(`[bridge] Permission denials: ${event.permission_denials.map(d => d.tool_name).join(', ')}`);
+        onQueryResult: (event) => {
+          if (event.permissionDenials?.length) {
+            console.warn(`[bridge] Permission denials: ${event.permissionDenials.map(d => d.toolName).join(', ')}`);
           }
-          const usage = event.usage ?? { input_tokens: 0, output_tokens: 0 };
+          const usage = { input_tokens: event.usage.inputTokens, output_tokens: event.usage.outputTokens, cost_usd: event.usage.costUsd };
           completedStats = costTracker.finish(usage);
           if (verboseLevel > 0) {
             renderer.onComplete(completedStats);
@@ -770,20 +774,17 @@ export class BridgeManager {
           }).catch(() => {});
         },
         onError: (err) => renderer.onError(err),
-        onPermissionRequest: async (req) => {
-          await this.broker.forwardPermissionRequest(
-            req,
-            (channelType) => this.getLastChatId(channelType) || msg.chatId,
-            this.getAdapters()
-          );
-        },
       });
 
       // Level 0: deliver final response via delivery layer (renderer didn't flush text)
       if (verboseLevel === 0) {
         const responseText = renderer.getResponseText().trim() || result.text.trim();
         if (!completedStats) {
-          const usage = result.usage ?? { input_tokens: 0, output_tokens: 0 };
+          const usage = {
+            input_tokens: result.usage?.inputTokens ?? 0,
+            output_tokens: result.usage?.outputTokens ?? 0,
+            cost_usd: result.usage?.costUsd,
+          };
           completedStats = costTracker.finish(usage);
         }
         const costLine = CostTracker.format(completedStats);

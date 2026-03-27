@@ -10,25 +10,25 @@ describe('PendingPermissions', () => {
 
   it('waitFor returns a promise that resolves on allow', async () => {
     const promise = gateway.waitFor('tool1');
-    gateway.resolve('tool1', true);
+    gateway.resolve('tool1', 'allow');
     const result = await promise;
     expect(result.behavior).toBe('allow');
   });
 
   it('waitFor returns deny result on deny', async () => {
     const promise = gateway.waitFor('tool2');
-    gateway.resolve('tool2', false);
+    gateway.resolve('tool2', 'deny');
     const result = await promise;
     expect(result.behavior).toBe('deny');
   });
 
   it('resolve returns true if permission was pending', () => {
     gateway.waitFor('tool1');
-    expect(gateway.resolve('tool1', true)).toBe(true);
+    expect(gateway.resolve('tool1', 'allow')).toBe(true);
   });
 
   it('resolve returns false if no pending permission', () => {
-    expect(gateway.resolve('unknown', true)).toBe(false);
+    expect(gateway.resolve('unknown', 'allow')).toBe(false);
   });
 
   it('times out after 5 minutes and auto-denies', async () => {
@@ -53,7 +53,7 @@ describe('PendingPermissions', () => {
     gateway.waitFor('t1');
     gateway.waitFor('t2');
     expect(gateway.pendingCount()).toBe(2);
-    gateway.resolve('t1', true);
+    gateway.resolve('t1', 'allow');
     expect(gateway.pendingCount()).toBe(1);
   });
 

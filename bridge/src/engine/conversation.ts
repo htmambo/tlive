@@ -1,6 +1,6 @@
 import { getBridgeContext } from '../context.js';
-import { parseSSE } from '../providers/sse-utils.js';
-import type { SSEEvent, FileAttachment, ToolUseEvent, PermissionRequestEvent, ResultEvent, PermissionRequestHandler, QueryControls } from '../providers/base.js';
+import type { CanonicalEvent } from '../messages/schema.js';
+import type { FileAttachment, PermissionRequestHandler, QueryControls } from '../providers/base.js';
 
 const TEXT_MIME_PREFIXES = ['text/', 'application/json', 'application/xml', 'application/javascript', 'application/typescript', 'application/x-yaml', 'application/toml'];
 
@@ -32,14 +32,14 @@ interface ProcessMessageParams {
   text: string;
   attachments?: FileAttachment[];
   onTextDelta?: (delta: string) => void;
-  onToolUse?: (event: ToolUseEvent['data']) => void;
-  onPermissionRequest?: (event: PermissionRequestEvent['data']) => Promise<void>;
-  onResult?: (event: ResultEvent['data']) => void;
+  onToolStart?: (event: { id: string; name: string; input: Record<string, unknown> }) => void;
+  onToolResult?: (event: { toolUseId: string; content: string; isError: boolean }) => void;
+  onQueryResult?: (event: { sessionId: string; isError: boolean; usage: { inputTokens: number; outputTokens: number; costUsd?: number }; permissionDenials?: Array<{ toolName: string; toolUseId: string }> }) => void;
   onError?: (error: string) => void;
-  onAgentProgress?: (data: { description: string; lastTool?: string; usage?: { tool_uses: number; duration_ms: number } }) => void;
+  onAgentStart?: (data: { description: string; taskId?: string }) => void;
+  onAgentProgress?: (data: { description: string; lastTool?: string; usage?: { toolUses: number; durationMs: number } }) => void;
   onAgentComplete?: (data: { summary: string; status: string }) => void;
   onPromptSuggestion?: (suggestion: string) => void;
-  onToolResult?: (event: { tool_use_id: string; content: string; is_error: boolean }) => void;
   onToolProgress?: (data: { toolName: string; elapsed: number }) => void;
   onRateLimit?: (data: { status: string; utilization?: number; resetsAt?: number }) => void;
   /** Receives query controls (interrupt, stopTask) when available */
@@ -52,7 +52,7 @@ interface ProcessMessageParams {
 interface ProcessMessageResult {
   text: string;
   sessionId: string;
-  usage?: { input_tokens: number; output_tokens: number; cost_usd?: number };
+  usage?: { inputTokens: number; outputTokens: number; costUsd?: number };
 }
 
 export class ConversationEngine {
@@ -60,7 +60,7 @@ export class ConversationEngine {
     const { store, llm, defaultWorkdir } = getBridgeContext();
     const lockKey = `session:${params.sessionId}`;
     let fullText = '';
-    let usage: { input_tokens: number; output_tokens: number; cost_usd?: number } | undefined;
+    let usage: { inputTokens: number; outputTokens: number; costUsd?: number } | undefined;
 
     // 1. Acquire lock
     await store.acquireLock(lockKey, 600_000);
@@ -97,65 +97,60 @@ export class ConversationEngine {
         params.onControls?.(result.controls);
       }
 
-      // 6. Consume stream
+      // 6. Consume stream — reader now gives CanonicalEvent objects directly
       const reader = result.stream.getReader();
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const event = parseSSE(value);
-        if (!event) continue;
-
-        switch (event.type) {
-          case 'text':
-            fullText += event.data as string;
-            params.onTextDelta?.(event.data as string);
+        switch (value.kind) {
+          case 'text_delta':
+            fullText += value.text;
+            params.onTextDelta?.(value.text);
             break;
-          case 'tool_use':
-            params.onToolUse?.(event.data as ToolUseEvent['data']);
+          case 'thinking_delta':
+            // Not accumulated — thinking is internal
             break;
-          case 'permission_request':
-            await params.onPermissionRequest?.(event.data as PermissionRequestEvent['data']);
+          case 'tool_start':
+            params.onToolStart?.(value);
             break;
-          case 'result': {
-            const resultData = event.data as ResultEvent['data'];
-            usage = resultData.usage;
-            // Save SDK session ID for conversation continuity (resume)
-            if (resultData.session_id) {
+          case 'tool_result':
+            params.onToolResult?.(value);
+            break;
+          case 'query_result': {
+            usage = value.usage;
+            if (value.sessionId) {
               const existing = await store.getSession(params.sessionId);
               await store.saveSession({
                 id: params.sessionId,
                 workingDirectory: existing?.workingDirectory ?? defaultWorkdir,
                 createdAt: existing?.createdAt ?? new Date().toISOString(),
-                sdkSessionId: resultData.session_id,
+                sdkSessionId: value.sessionId,
               });
             }
-            params.onResult?.(resultData);
+            params.onQueryResult?.(value);
             break;
           }
-          case 'agent_started':
+          case 'agent_start':
+            params.onAgentStart?.(value);
+            break;
           case 'agent_progress':
-            params.onAgentProgress?.(event.data as { description: string; lastTool?: string; usage?: { tool_uses: number; duration_ms: number } });
+            params.onAgentProgress?.(value);
             break;
           case 'agent_complete':
-            params.onAgentComplete?.(event.data as { summary: string; status: string });
+            params.onAgentComplete?.(value);
             break;
           case 'prompt_suggestion':
-            params.onPromptSuggestion?.(event.data as string);
+            params.onPromptSuggestion?.(value.suggestion);
             break;
-          case 'tool_result': {
-            const resultData = event.data as { tool_use_id: string; content: string; is_error: boolean };
-            params.onToolResult?.(resultData);
-            break;
-          }
           case 'tool_progress':
-            params.onToolProgress?.(event.data as { toolName: string; elapsed: number });
+            params.onToolProgress?.(value);
             break;
           case 'rate_limit':
-            params.onRateLimit?.(event.data as { status: string; utilization?: number; resetsAt?: number });
+            params.onRateLimit?.(value);
             break;
           case 'error':
-            params.onError?.(event.data as string);
+            params.onError?.(value.message);
             break;
         }
       }

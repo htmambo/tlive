@@ -40,7 +40,7 @@ describe('BridgeManager', () => {
       llm: {
         streamChat: () => ({
           stream: new ReadableStream({
-            start(c) { c.enqueue('data: {"type":"text","data":"reply"}\n'); c.enqueue('data: {"type":"result","data":{"session_id":"s1","is_error":false}}\n'); c.close(); }
+            start(c) { c.enqueue({ kind: 'text_delta', text: 'reply' }); c.enqueue({ kind: 'query_result', sessionId: 's1', isError: false, usage: { inputTokens: 0, outputTokens: 0 } }); c.close(); }
           }),
           controls: undefined,
         }),
@@ -232,7 +232,7 @@ describe('BridgeManager', () => {
     const ctx = (await import('../context.js')).getBridgeContext();
     (ctx.llm as any).streamChat = () => ({
       stream: new ReadableStream({
-        start(c) { c.enqueue('data: {"type":"error","data":"boom"}\n'); c.close(); }
+        start(c) { c.enqueue({ kind: 'error', message: 'boom' }); c.close(); }
       }),
       controls: undefined,
     });

@@ -8,8 +8,9 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { SDKMessage, PermissionResult, SDKPermissionDenial } from '@anthropic-ai/claude-agent-sdk';
-import { sseEvent } from './sse-utils.js';
+import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+import { ClaudeAdapter } from '../messages/claude-adapter.js';
+import type { CanonicalEvent } from '../messages/schema.js';
 import type { LLMProvider, StreamChatParams, StreamChatResult, QueryControls } from './base.js';
 import type { PendingPermissions } from '../permissions/gateway.js';
 
@@ -108,7 +109,7 @@ export class ClaudeSDKProvider implements LLMProvider {
     // Query controls exposed for interrupt/stopTask
     let controls: QueryControls | undefined;
 
-    const stream = new ReadableStream<string>({
+    const stream = new ReadableStream<CanonicalEvent>({
       start(controller) {
         (async () => {
           const state: StreamState = {
@@ -250,12 +251,24 @@ export class ClaudeSDKProvider implements LLMProvider {
               stopTask: (taskId: string) => (q as any).stopTask?.(taskId) ?? Promise.resolve(),
             };
 
+            const adapter = new ClaudeAdapter();
+
             for await (const msg of q) {
-              // Debug: log message types to diagnose early termination
               const sub = 'subtype' in msg ? `.${msg.subtype}` : '';
               const turns = 'num_turns' in msg ? ` turns=${msg.num_turns}` : '';
               console.log(`[claude-sdk] msg: ${msg.type}${sub}${turns}`);
-              handleMessage(msg, controller, state);
+
+              const events = adapter.mapMessage(msg as any);
+              for (const event of events) {
+                controller.enqueue(event);
+              }
+
+              // Track state for error handling
+              if (msg.type === 'result') state.hasReceivedResult = true;
+              if (events.some(e => e.kind === 'text_delta')) state.hasStreamedText = true;
+              for (const event of events) {
+                if (event.kind === 'text_delta') state.lastAssistantText += event.text;
+              }
             }
 
             console.log(`[claude-sdk] query ended. streamed=${state.hasStreamedText} text_len=${state.lastAssistantText.length}`);
@@ -267,13 +280,13 @@ export class ClaudeSDKProvider implements LLMProvider {
             const authType = classifyAuthError(message) || (stderrBuf ? classifyAuthError(stderrBuf) : false);
             if (authType === 'cli') {
               console.error('[claude-sdk] Auth error: not logged in. Run `claude /login` to authenticate.');
-              controller.enqueue(sseEvent('error', 'Not logged in. Run `claude /login` to authenticate.'));
+              controller.enqueue({ kind: 'error', message: 'Not logged in. Run `claude /login` to authenticate.' } as CanonicalEvent);
               controller.close();
               return;
             }
             if (authType === 'api') {
               console.error('[claude-sdk] Auth error: invalid API key or unauthorized.');
-              controller.enqueue(sseEvent('error', 'Invalid API key or unauthorized. Check your credentials.'));
+              controller.enqueue({ kind: 'error', message: 'Invalid API key or unauthorized. Check your credentials.' } as CanonicalEvent);
               controller.close();
               return;
             }
@@ -287,7 +300,7 @@ export class ClaudeSDKProvider implements LLMProvider {
             const diagInfo = stderrBuf ? ` [stderr: ${stderrBuf.slice(-200)}]` : '';
             console.error(`[claude-sdk] query error: ${message}${diagInfo}`);
 
-            controller.enqueue(sseEvent('error', message));
+            controller.enqueue({ kind: 'error', message } as CanonicalEvent);
             controller.close();
           }
         })();
@@ -298,160 +311,3 @@ export class ClaudeSDKProvider implements LLMProvider {
   }
 }
 
-/** Mutates state; returns true if text was streamed in this message. */
-function handleMessage(
-  msg: SDKMessage,
-  controller: ReadableStreamDefaultController<string>,
-  state: StreamState,
-): void {
-  switch (msg.type) {
-    case 'stream_event': {
-      const event = msg.event;
-      if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-        state.lastAssistantText += event.delta.text;
-        controller.enqueue(sseEvent('text', event.delta.text));
-        state.hasStreamedText = true;
-      }
-      if (event.type === 'content_block_start' && event.content_block.type === 'tool_use') {
-        controller.enqueue(sseEvent('tool_use', {
-          id: event.content_block.id,
-          name: event.content_block.name,
-          input: {},
-        }));
-      }
-      break;
-    }
-
-    case 'assistant': {
-      if (msg.message?.content) {
-        for (const block of msg.message.content) {
-          if (block.type === 'tool_use') {
-            controller.enqueue(sseEvent('tool_use', {
-              id: block.id,
-              name: block.name,
-              input: block.input,
-            }));
-          } else if (block.type === 'text' && block.text && !state.hasStreamedText) {
-            // Fallback: if no stream_event text_delta was received,
-            // emit the full text from the assistant message
-            state.lastAssistantText = block.text;
-            controller.enqueue(sseEvent('text', block.text));
-            state.hasStreamedText = true;
-          }
-        }
-      }
-      break;
-    }
-
-    case 'user': {
-      const content = msg.message?.content;
-      if (Array.isArray(content)) {
-        for (const block of content) {
-          if (typeof block === 'object' && block !== null && 'type' in block && block.type === 'tool_result') {
-            const rb = block as { tool_use_id: string; content?: unknown; is_error?: boolean };
-            controller.enqueue(sseEvent('tool_result', {
-              tool_use_id: rb.tool_use_id,
-              content: typeof rb.content === 'string' ? rb.content : JSON.stringify(rb.content ?? ''),
-              is_error: rb.is_error || false,
-            }));
-          }
-        }
-      }
-      break;
-    }
-
-    case 'result': {
-      state.hasReceivedResult = true;
-      // Log permission denials — these explain why Claude may have stopped early
-      const denials = 'permission_denials' in msg && Array.isArray(msg.permission_denials)
-        ? msg.permission_denials as SDKPermissionDenial[]
-        : [];
-      if (denials.length > 0) {
-        console.warn(`[claude-sdk] Permission denials:`, denials.map(d => `${d.tool_name}(${d.tool_use_id})`).join(', '));
-      }
-      if (msg.subtype === 'success') {
-        controller.enqueue(sseEvent('result', {
-          session_id: msg.session_id,
-          is_error: msg.is_error,
-          usage: {
-            input_tokens: msg.usage.input_tokens,
-            output_tokens: msg.usage.output_tokens,
-            cost_usd: msg.total_cost_usd,
-          },
-          permission_denials: denials.length > 0 ? denials : undefined,
-        }));
-      } else {
-        const errors = 'errors' in msg && Array.isArray(msg.errors)
-          ? msg.errors.join('; ')
-          : 'Unknown error';
-        // Include permission denials in error message for visibility
-        const denialInfo = denials.length > 0
-          ? ` [denied: ${denials.map(d => d.tool_name).join(', ')}]`
-          : '';
-        controller.enqueue(sseEvent('error', errors + denialInfo));
-      }
-      break;
-    }
-
-    case 'prompt_suggestion': {
-      const m = msg as { suggestion?: string };
-      if (m.suggestion) {
-        controller.enqueue(sseEvent('prompt_suggestion', m.suggestion));
-      }
-      break;
-    }
-
-    case 'system': {
-      if (msg.subtype === 'init') {
-        controller.enqueue(sseEvent('status', {
-          session_id: msg.session_id,
-          model: msg.model,
-        }));
-      } else if (msg.subtype === 'task_started') {
-        const m = msg as { description?: string };
-        controller.enqueue(sseEvent('agent_started', { description: m.description || 'Agent' }));
-      } else if (msg.subtype === 'task_progress') {
-        const m = msg as { description?: string; summary?: string; last_tool_name?: string; usage?: { tool_uses: number; duration_ms: number } };
-        controller.enqueue(sseEvent('agent_progress', {
-          // Prefer AI summary (from agentProgressSummaries) over static description
-          description: m.summary || m.description || 'Working...',
-          lastTool: m.last_tool_name,
-          usage: m.usage,
-        }));
-      } else if (msg.subtype === 'task_notification') {
-        const m = msg as { summary?: string; status?: string };
-        controller.enqueue(sseEvent('agent_complete', {
-          summary: m.summary || 'Done',
-          status: m.status || 'completed',
-        }));
-      }
-      break;
-    }
-
-    // Tool-level progress (long-running Bash commands, etc.)
-    case 'tool_progress': {
-      const m = msg as { tool_name?: string; elapsed_time_seconds?: number; task_id?: string };
-      if (m.tool_name && m.elapsed_time_seconds && m.elapsed_time_seconds > 3) {
-        controller.enqueue(sseEvent('tool_progress', {
-          toolName: m.tool_name,
-          elapsed: m.elapsed_time_seconds,
-        }));
-      }
-      break;
-    }
-
-    // API retry (rate limits, server errors)
-    case 'rate_limit_event': {
-      const m = msg as { rate_limit_info?: { status?: string; utilization?: number; resetsAt?: number } };
-      const info = m.rate_limit_info;
-      if (info?.status === 'rejected' || info?.status === 'allowed_warning') {
-        controller.enqueue(sseEvent('rate_limit', {
-          status: info.status,
-          utilization: info.utilization,
-          resetsAt: info.resetsAt,
-        }));
-      }
-      break;
-    }
-  }
-}

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ConversationEngine } from '../engine/conversation.js';
 import { initBridgeContext } from '../context.js';
-import { sseEvent } from '../providers/sse-utils.js';
+import type { CanonicalEvent } from '../messages/schema.js';
 
 // Mock store
 function createMockStore() {
@@ -19,16 +19,19 @@ function createMockStore() {
   };
 }
 
-// Mock LLM that emits controlled events
-function createMockLLM(events: string[]) {
+// Mock LLM that emits controlled CanonicalEvent objects
+function createMockLLM(events: CanonicalEvent[]) {
   return {
-    streamChat: () => new ReadableStream<string>({
-      start(controller) {
-        for (const event of events) {
-          controller.enqueue(event);
+    streamChat: () => ({
+      stream: new ReadableStream<CanonicalEvent>({
+        start(controller) {
+          for (const event of events) {
+            controller.enqueue(event);
+          }
+          controller.close();
         }
-        controller.close();
-      }
+      }),
+      controls: undefined,
     })
   };
 }
@@ -40,9 +43,9 @@ describe('ConversationEngine', () => {
   beforeEach(() => {
     mockStore = createMockStore();
     const mockLLM = createMockLLM([
-      sseEvent('text', 'Hello '),
-      sseEvent('text', 'world'),
-      sseEvent('result', { session_id: 's1', is_error: false, usage: { input_tokens: 10, output_tokens: 5 } }),
+      { kind: 'text_delta', text: 'Hello ' },
+      { kind: 'text_delta', text: 'world' },
+      { kind: 'query_result', sessionId: 's1', isError: false, usage: { inputTokens: 10, outputTokens: 5 } },
     ]);
 
     initBridgeContext({
@@ -88,23 +91,26 @@ describe('ConversationEngine', () => {
     expect(deltas).toEqual(['Hello ', 'world']);
   });
 
-  it('calls onResult with usage', async () => {
+  it('calls onQueryResult with usage', async () => {
     let resultData: any;
     await engine.processMessage({
       sessionId: 's1',
       text: 'hi',
-      onResult: (r) => { resultData = r; },
+      onQueryResult: (r) => { resultData = r; },
     });
-    expect(resultData.usage.input_tokens).toBe(10);
+    expect(resultData.usage.inputTokens).toBe(10);
   });
 
   it('releases lock even on error', async () => {
     const errorLLM = {
-      streamChat: () => new ReadableStream<string>({
-        start(controller) {
-          controller.enqueue(sseEvent('error', 'boom'));
-          controller.close();
-        }
+      streamChat: () => ({
+        stream: new ReadableStream<CanonicalEvent>({
+          start(controller) {
+            controller.enqueue({ kind: 'error', message: 'boom' });
+            controller.close();
+          }
+        }),
+        controls: undefined,
       })
     };
     initBridgeContext({ store: mockStore as any, llm: errorLLM as any, permissions: {} as any, core: {} as any });
