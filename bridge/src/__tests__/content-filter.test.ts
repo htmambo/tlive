@@ -2,6 +2,23 @@ import { describe, it, expect } from 'vitest';
 import { redactSensitiveContent } from '../engine/content-filter.js';
 
 describe('content-filter', () => {
+  describe('ANSI stripping', () => {
+    it('strips color codes', () => {
+      const input = '\x1B[32mPASS\x1B[39m \x1B[90msrc/test.ts\x1B[39m';
+      expect(redactSensitiveContent(input)).toBe('PASS src/test.ts');
+    });
+
+    it('strips bold/dim codes', () => {
+      const input = '\x1B[1m\x1B[22mBold\x1B[2mDim\x1B[22m';
+      expect(redactSensitiveContent(input)).toBe('BoldDim');
+    });
+
+    it('handles mixed ANSI + normal text', () => {
+      const input = '● \x1B[32m✓\x1B[39m 5 tests passed';
+      expect(redactSensitiveContent(input)).toBe('● ✓ 5 tests passed');
+    });
+  });
+
   describe('API keys', () => {
     it('redacts OpenAI API keys', () => {
       const input = 'key is sk-proj-abc123def456ghi789jkl012mno345pqr678';

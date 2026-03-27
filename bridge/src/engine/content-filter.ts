@@ -1,3 +1,10 @@
+// Strip ANSI escape sequences (terminal color codes, cursor movement, etc.)
+const ANSI_PATTERN = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g;
+
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_PATTERN, '');
+}
+
 // API key patterns — match common provider key formats
 const API_KEY_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   // OpenAI
@@ -32,7 +39,7 @@ const SENSITIVE_ENV_PATTERN = /\b([A-Z_]*(?:PASSWORD|SECRET|TOKEN|API_KEY|PRIVAT
  * from text before sending to IM platforms.
  */
 export function redactSensitiveContent(text: string): string {
-  let result = text;
+  let result = stripAnsi(text);
 
   // 1. Private keys (multi-line, must be first)
   PRIVATE_KEY_PATTERN.lastIndex = 0;
