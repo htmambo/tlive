@@ -12,10 +12,11 @@ import { downgradeHeadings } from '../markdown/feishu.js';
 import { TerminalCardRenderer, type VerboseLevel } from './terminal-card-renderer.js';
 import { SessionStateManager } from './session-state.js';
 import { PermissionCoordinator } from './permission-coordinator.js';
+import { CommandRouter } from './command-router.js';
 import type { FeishuStreamingSession } from '../channels/feishu-streaming.js';
 import { CostTracker } from './cost-tracker.js';
-import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { homedir, networkInterfaces } from 'node:os';
 
 /** Bridge commands handled synchronously (don't block adapter loop) */
@@ -73,6 +74,7 @@ export class BridgeManager {
   /** Pending image attachments waiting for a text message to merge with (key: channelType:chatId) */
   private pendingAttachments = new Map<string, { attachments: import('../channels/types.js').FileAttachment[]; timestamp: number }>();
 
+  private commands: CommandRouter;
   private chatIdFile: string;
 
   constructor() {
@@ -91,6 +93,13 @@ export class BridgeManager {
         if (typeof v === 'string') this.lastChatId.set(k, v);
       }
     } catch { /* no saved chat IDs yet */ }
+    this.commands = new CommandRouter(
+      this.state,
+      () => this.adapters,
+      this.router,
+      () => this.coreAvailable,
+      this.activeControls,
+    );
   }
 
   /** Expose coreAvailable flag for main.ts polling loop */
@@ -394,7 +403,7 @@ export class BridgeManager {
 
     // Bridge commands — only intercept known commands, pass others to Claude Code
     if (msg.text.startsWith('/')) {
-      const handled = await this.handleCommand(adapter, msg);
+      const handled = await this.commands.handle(adapter, msg);
       if (handled) return true;
       // Unrecognized slash command → fall through to Claude Code
     }
@@ -656,355 +665,4 @@ export class BridgeManager {
     return true;
   }
 
-  private async handleCommand(adapter: BaseChannelAdapter, msg: InboundMessage): Promise<boolean> {
-    const parts = msg.text.split(' ');
-    const cmd = parts[0].toLowerCase();
-
-    switch (cmd) {
-      case '/status': {
-        const ctx = getBridgeContext();
-        const healthy = (ctx.core as { isHealthy?: () => boolean }).isHealthy?.() ?? false;
-        const coreStatus = healthy ? '🟢 connected' : '🔴 disconnected';
-        const channelList = Array.from(this.adapters.keys()).join(', ') || 'none';
-
-        if (adapter.channelType === 'telegram') {
-          const html = [
-            `📡 <b>TLive Status</b>`,
-            '',
-            `<b>Bridge:</b>    🟢 running`,
-            `<b>Core:</b>      ${coreStatus}`,
-            `<b>Channels:</b>  <code>${channelList}</code>`,
-          ].join('\n');
-          await adapter.send({ chatId: msg.chatId, html });
-        } else if (adapter.channelType === 'discord') {
-          await adapter.send({
-            chatId: msg.chatId,
-            embed: {
-              title: '📡 TLive Status',
-              color: 0x3399FF,
-              fields: [
-                { name: 'Bridge', value: '🟢 Running', inline: true },
-                { name: 'Core', value: coreStatus, inline: true },
-                { name: 'Channels', value: `\`${channelList}\``, inline: true },
-              ],
-            },
-          });
-        } else {
-          await adapter.send({
-            chatId: msg.chatId,
-            text: `**Bridge:** 🟢 running\n**Core:** ${coreStatus}\n**Channels:** ${channelList}`,
-            feishuHeader: { template: 'blue', title: '📡 TLive Status' },
-          });
-        }
-        return true;
-      }
-      case '/new': {
-        const newSessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-        await this.router.rebind(msg.channelType, msg.chatId, newSessionId);
-        this.state.clearLastActive(msg.channelType, msg.chatId);
-        // Clear Discord thread binding so next conversation creates a fresh thread
-        this.state.clearThread(msg.channelType, msg.chatId);
-        if (adapter.channelType === 'feishu') {
-          await adapter.send({
-            chatId: msg.chatId,
-            text: 'Session cleared. Send a message to begin.',
-            feishuHeader: { template: 'green', title: '🆕 New Session' },
-          });
-        } else if (adapter.channelType === 'discord') {
-          await adapter.send({
-            chatId: msg.chatId,
-            embed: { title: '🆕 New Session', description: 'Session cleared. Send a message to begin.', color: 0x00CC66 },
-          });
-        } else {
-          await adapter.send({ chatId: msg.chatId, html: '🆕 <b>New session started.</b> Send a message to begin.' });
-        }
-        return true;
-      }
-      case '/verbose': {
-        const level = parseInt(parts[1], 10) as VerboseLevel;
-        if ([0, 1].includes(level)) {
-          this.state.setVerboseLevel(msg.channelType, msg.chatId, level);
-          const labels = ['🤫 quiet', '📝 terminal card'];
-          const text = `Verbose: ${labels[level]}`;
-          if (adapter.channelType === 'discord') {
-            await adapter.send({ chatId: msg.chatId, embed: { description: text, color: 0x3399FF } });
-          } else {
-            await adapter.send({ chatId: msg.chatId, text });
-          }
-        } else {
-          const usage = 'Usage: `/verbose 0|1`\n0=quiet, 1=terminal card';
-          if (adapter.channelType === 'discord') {
-            await adapter.send({ chatId: msg.chatId, embed: { description: usage, color: 0x888888 } });
-          } else {
-            await adapter.send({ chatId: msg.chatId, text: usage });
-          }
-        }
-        return true;
-      }
-      case '/perm': {
-        const sub = parts[1]?.toLowerCase();
-        if (sub === 'on' || sub === 'off') {
-          this.state.setPermMode(msg.channelType, msg.chatId, sub);
-          const text = sub === 'on'
-            ? '🔐 Permission prompts: ON — dangerous tools will ask for confirmation'
-            : '⚡ Permission prompts: OFF — all tools auto-allowed';
-          if (adapter.channelType === 'discord') {
-            await adapter.send({ chatId: msg.chatId, embed: { description: text, color: sub === 'on' ? 0xFFA500 : 0x00CC00 } });
-          } else {
-            await adapter.send({ chatId: msg.chatId, text });
-          }
-        } else {
-          const current = this.state.getPermMode(msg.channelType, msg.chatId);
-          const text = `🔐 Permission mode: **${current}**\nUsage: \`/perm on|off\`\non = prompt for dangerous tools (default)\noff = auto-allow all`;
-          if (adapter.channelType === 'discord') {
-            await adapter.send({ chatId: msg.chatId, embed: { description: text, color: 0x888888 } });
-          } else {
-            await adapter.send({ chatId: msg.chatId, text });
-          }
-        }
-        return true;
-      }
-      case '/stop': {
-        const chatKey = this.state.stateKey(msg.channelType, msg.chatId);
-        const ctrl = this.activeControls.get(chatKey);
-        if (ctrl) {
-          await ctrl.interrupt();
-          await adapter.send({ chatId: msg.chatId, text: '⏹ Interrupted current execution' });
-        } else {
-          await adapter.send({ chatId: msg.chatId, text: '⚠️ No active execution to stop' });
-        }
-        return true;
-      }
-      case '/effort': {
-        const LEVELS = ['low', 'medium', 'high', 'max'] as const;
-        const level = parts[1]?.toLowerCase();
-        if (level && LEVELS.includes(level as typeof LEVELS[number])) {
-          this.state.setEffort(msg.channelType, msg.chatId, level as typeof LEVELS[number]);
-          const icons: Record<string, string> = { low: '⚡', medium: '🧠', high: '💪', max: '🔥' };
-          const text = `${icons[level] || '🧠'} Effort: **${level}**`;
-          await adapter.send({ chatId: msg.chatId, text });
-        } else {
-          const current = this.state.getEffort(msg.channelType, msg.chatId) || 'default';
-          const text = `🧠 Effort: **${current}**\nUsage: \`/effort low|medium|high|max\`\nlow = fast · medium = balanced · high = thorough · max = maximum`;
-          await adapter.send({ chatId: msg.chatId, text });
-        }
-        return true;
-      }
-      case '/hooks': {
-        const pauseFile = join(homedir(), '.tlive', 'hooks-paused');
-        const sub = parts[1]?.toLowerCase();
-        if (sub === 'pause') {
-          mkdirSync(dirname(pauseFile), { recursive: true });
-          writeFileSync(pauseFile, '');
-          await adapter.send({ chatId: msg.chatId, text: '⏸ Hooks paused — auto-allow, no notifications.' });
-        } else if (sub === 'resume') {
-          try { unlinkSync(pauseFile); } catch {}
-          await adapter.send({ chatId: msg.chatId, text: '▶ Hooks resumed — forwarding to IM.' });
-        } else {
-          const paused = existsSync(pauseFile);
-          await adapter.send({ chatId: msg.chatId, text: `Hooks: ${paused ? '⏸ paused' : '▶ active'}` });
-        }
-        return true;
-      }
-      case '/sessions': {
-        const { store } = getBridgeContext();
-        const allSessions = await store.listSessions();
-        const binding = await this.router.resolve(msg.channelType, msg.chatId);
-        const currentSessionId = binding?.sessionId;
-
-        if (allSessions.length === 0) {
-          await adapter.send({ chatId: msg.chatId, text: 'No sessions found.' });
-          return true;
-        }
-
-        const sorted = allSessions
-          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-          .slice(0, 10);
-
-        const lines: string[] = [];
-        for (let i = 0; i < sorted.length; i++) {
-          const s = sorted[i];
-          const isCurrent = s.id === currentSessionId;
-          const marker = isCurrent ? ' ◀' : '';
-          const date = new Date(s.createdAt).toLocaleDateString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-          const msgs = await store.getMessages(s.id);
-          const firstUser = msgs.find(m => m.role === 'user');
-          const preview = firstUser
-            ? (firstUser.content.length > 40 ? firstUser.content.slice(0, 37) + '...' : firstUser.content)
-            : '(empty)';
-          lines.push(`${i + 1}. ${date} — ${preview}${marker}`);
-        }
-
-        const footer = '\nUse /session <n> to switch';
-
-        if (adapter.channelType === 'telegram') {
-          await adapter.send({ chatId: msg.chatId, html: `<b>📋 Sessions</b>\n\n${lines.join('\n')}${footer}` });
-        } else if (adapter.channelType === 'discord') {
-          await adapter.send({
-            chatId: msg.chatId,
-            embed: {
-              title: '📋 Sessions',
-              color: 0x3399FF,
-              description: lines.join('\n') + footer,
-            },
-          });
-        } else {
-          await adapter.send({
-            chatId: msg.chatId,
-            text: `${lines.join('\n')}${footer}`,
-            feishuHeader: { template: 'blue', title: '📋 Sessions' },
-          });
-        }
-        return true;
-      }
-      case '/session': {
-        const idx = parseInt(parts[1], 10);
-        if (isNaN(idx) || idx < 1) {
-          await adapter.send({ chatId: msg.chatId, text: 'Usage: /session <number>\nUse /sessions to list.' });
-          return true;
-        }
-
-        const { store } = getBridgeContext();
-        const allSessions = await store.listSessions();
-        const sorted = allSessions
-          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-          .slice(0, 10);
-
-        if (idx > sorted.length) {
-          await adapter.send({ chatId: msg.chatId, text: `Session ${idx} not found. Use /sessions to list.` });
-          return true;
-        }
-
-        const target = sorted[idx - 1];
-        await this.router.rebind(msg.channelType, msg.chatId, target.id);
-        this.state.clearLastActive(msg.channelType, msg.chatId);
-
-        const msgs = await store.getMessages(target.id);
-        const firstUser = msgs.find(m => m.role === 'user');
-        const preview = firstUser
-          ? (firstUser.content.length > 50 ? firstUser.content.slice(0, 47) + '...' : firstUser.content)
-          : '(empty)';
-        const hasContext = target.sdkSessionId ? '✅ has context' : '⚠️ no SDK session';
-        await adapter.send({
-          chatId: msg.chatId,
-          text: `🔄 Switched to session ${idx}\n${preview}\n${hasContext}`,
-        });
-        return true;
-      }
-      case '/help': {
-        if (adapter.channelType === 'telegram') {
-          const html = [
-            '<b>❓ TLive Commands</b>',
-            '',
-            '<code>/new</code> — New conversation',
-            '<code>/sessions</code> — List recent sessions',
-            '<code>/session &lt;n&gt;</code> — Switch to session #n',
-            '<code>/verbose 0|1</code> — Detail level',
-            '  0 = quiet · 1 = terminal card',
-            '<code>/perm on|off</code> — Tool permission prompts',
-            '<code>/effort low|high|max</code> — Thinking depth',
-            '<code>/stop</code> — Interrupt current execution',
-            '<code>/hooks pause|resume</code> — Toggle IM approval',
-            '<code>/status</code> — Bridge status',
-            '<code>/approve &lt;code&gt;</code> — Approve pairing request',
-            '<code>/pairings</code> — List pending pairings',
-            '<code>/help</code> — This message',
-            '',
-            '<i>💬 Reply <b>allow</b>/<b>deny</b> to approve permissions</i>',
-          ].join('\n');
-          await adapter.send({ chatId: msg.chatId, html });
-        } else if (adapter.channelType === 'discord') {
-          await adapter.send({
-            chatId: msg.chatId,
-            embed: {
-              title: '❓ TLive Commands',
-              color: 0x5865F2,
-              description: [
-                '`/new` — New conversation',
-                '`/sessions` — List recent sessions',
-                '`/session <n>` — Switch to session #n',
-                '`/verbose 0|1` — Detail level',
-                '> 0 = quiet · 1 = terminal card',
-                '`/perm on|off` — Tool permission prompts',
-                '`/hooks pause|resume` — Toggle IM approval',
-                '`/status` — Bridge status',
-                '`/approve <code>` — Approve pairing request',
-                '`/pairings` — List pending pairings',
-                '`/help` — This message',
-                '',
-                '*💬 Reply `allow`/`deny` to approve permissions*',
-              ].join('\n'),
-            },
-          });
-        } else {
-          const feishuLines = [
-            '/new — New conversation',
-            '/sessions — List recent sessions',
-            '/session <n> — Switch to session #n',
-            '/verbose 0|1 — Detail level',
-            '  0 = quiet · 1 = terminal card',
-            '/perm on|off — Tool permission prompts',
-            '/effort low|high|max — Thinking depth',
-            '/stop — Interrupt current execution',
-            '/hooks pause|resume — Toggle IM approval',
-            '/status — Bridge status',
-            '/approve <code> — Approve pairing request',
-            '/pairings — List pending pairings',
-            '/help — This message',
-            '',
-            '💬 回复 **allow** / **deny** 审批权限',
-          ];
-          await adapter.send({
-            chatId: msg.chatId,
-            text: feishuLines.join('\n'),
-            feishuHeader: { template: 'indigo', title: '❓ TLive Commands' },
-          });
-        }
-        return true;
-      }
-      case '/approve': {
-        const code = parts[1];
-        if (!code) {
-          await adapter.send({ chatId: msg.chatId, text: 'Usage: /approve <pairing_code>' });
-          return true;
-        }
-        // Try to approve pairing on Telegram adapter
-        const tgAdapter = this.adapters.get('telegram');
-        if (tgAdapter && 'approvePairing' in tgAdapter) {
-          const result = (tgAdapter as any).approvePairing(code);
-          if (result) {
-            await adapter.send({
-              chatId: msg.chatId,
-              text: `✅ Approved user ${result.username} (${result.userId})`,
-            });
-          } else {
-            await adapter.send({ chatId: msg.chatId, text: '❌ Code not found or expired' });
-          }
-        } else {
-          await adapter.send({ chatId: msg.chatId, text: '⚠️ Pairing not available' });
-        }
-        return true;
-      }
-      case '/pairings': {
-        const tgAdapter = this.adapters.get('telegram');
-        if (tgAdapter && 'listPairings' in tgAdapter) {
-          const pairings = (tgAdapter as any).listPairings() as Array<{ code: string; userId: string; username: string }>;
-          if (pairings.length === 0) {
-            await adapter.send({ chatId: msg.chatId, text: 'No pending pairing requests.' });
-          } else {
-            const lines = pairings.map(p => `• <code>${p.code}</code> — ${p.username} (${p.userId})`);
-            await adapter.send({
-              chatId: msg.chatId,
-              html: `<b>🔐 Pending Pairings</b>\n\n${lines.join('\n')}\n\nUse /approve <code> to approve.`,
-            });
-          }
-        } else {
-          await adapter.send({ chatId: msg.chatId, text: '⚠️ Pairing not available' });
-        }
-        return true;
-      }
-      default:
-        return false;
-    }
-  }
 }
