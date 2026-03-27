@@ -8,7 +8,7 @@ const TOOL_ICONS: Record<string, string> = {
 const SILENT_RESULT_TOOLS = new Set(['Read', 'Glob', 'Grep', 'Write', 'Edit', 'Agent', 'WebSearch', 'WebFetch']);
 
 /** Max lines of tool output to show in preview */
-export const TOOL_RESULT_MAX_LINES = 6;
+export const TOOL_RESULT_MAX_LINES = 3;
 
 export function getToolIcon(name: string): string {
   return TOOL_ICONS[name] ?? '🔧';
@@ -46,6 +46,26 @@ export function getToolTitle(name: string, input: Record<string, unknown>): stri
     }
     default:
       return name;
+  }
+}
+
+export function getToolCommand(name: string, input: Record<string, unknown>): string {
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+  switch (name) {
+    case 'Read': case 'Edit': case 'Write':
+      return str(input.file_path);
+    case 'Grep':
+      return `"${str(input.pattern)}" in ${str(input.path) || '.'}`;
+    case 'Glob':
+      return str(input.pattern);
+    case 'Bash': {
+      const cmd = str(input.command);
+      return cmd.length > 80 ? cmd.slice(0, 77) + '...' : cmd;
+    }
+    case 'Agent':
+      return str(input.description) || str(input.prompt)?.slice(0, 60) || '';
+    default:
+      return '';
   }
 }
 

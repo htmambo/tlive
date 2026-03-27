@@ -1,6 +1,6 @@
 import { CostTracker, type UsageStats } from './cost-tracker.js';
 import { redactSensitiveContent } from './content-filter.js';
-import { getToolIcon, getToolTitle, getToolResultPreview } from './tool-registry.js';
+import { getToolIcon, getToolTitle, getToolCommand, getToolResultPreview } from './tool-registry.js';
 
 export type VerboseLevel = 0 | 1;
 
@@ -16,6 +16,7 @@ interface ToolEntry {
   id: string;
   name: string;
   title: string;
+  input?: Record<string, unknown>;
   running: boolean;
   denied: boolean;
   resultPreview?: string;
@@ -87,7 +88,7 @@ export class TerminalCardRenderer {
   onToolStart(name: string, input: Record<string, unknown>, parentToolUseId?: string): string {
     const id = `tool-${++this.toolIdCounter}`;
     const title = getToolTitle(name, input);
-    const entry: ToolEntry = { id, name, title, running: true, denied: false, parentToolUseId };
+    const entry: ToolEntry = { id, name, title, input, running: true, denied: false, parentToolUseId };
 
     // Flush any previous pending tool first
     this.flushPendingTool();
@@ -292,6 +293,12 @@ export class TerminalCardRenderer {
     return this.collapsedCount + this.toolEntries.filter(e => !e.parentToolUseId).length;
   }
 
+  private formatToolHeader(entry: ToolEntry): string {
+    const emoji = entry.running ? '🔄' : getToolIcon(entry.name);
+    const cmd = getToolCommand(entry.name, entry.input || {});
+    return cmd ? `${emoji} \`${cmd}\`` : `${emoji} ${entry.name}`;
+  }
+
   render(): string {
     const parts: string[] = [];
 
@@ -304,7 +311,7 @@ export class TerminalCardRenderer {
     // Tool section
     if (this.completed && this.totalToolCount() > 0) {
       // Collapse tool log on completion — but still show agent summaries
-      parts.push(`● ... (${this.totalToolCount()} tools)`);
+      parts.push(`⚡ ${this.totalToolCount()} tools`);
       for (const agent of this.agents) {
         if (agent.status !== 'running') {
           const icon = agent.status === 'completed' ? '●' : agent.status === 'failed' ? '❌' : '⏹';
@@ -337,29 +344,25 @@ export class TerminalCardRenderer {
         const children = childTools.get(entry.id) || [];
         const isAgentEntry = agent || children.length > 0;
 
-        const icon = entry.running ? '🔄' : '●';
-        parts.push(`${icon} ${entry.title}`);
+        parts.push(this.formatToolHeader(entry));
 
         // Result preview for non-agent top-level tools
         if (entry.resultPreview && !isAgentEntry) {
           const lines = entry.resultPreview.split('\n');
           for (const line of lines) {
-            parts.push(`├  ${line}`);
+            parts.push(`   ${line}`);
           }
         }
 
         // Render agent children
         if (isAgentEntry) {
-          for (let i = 0; i < children.length; i++) {
-            const child = children[i];
-            const agentDone = agent && agent.status !== 'running';
-            const isLast = i === children.length - 1 && !agentDone;
-            const connector = isLast ? '│ └' : '│ ├';
-            const childIcon = child.running ? '🔄 ' : '';
-            parts.push(`${connector} ${childIcon}${child.title}`);
+          for (const child of children) {
+            const childEmoji = child.running ? '🔄' : getToolIcon(child.name);
+            const childCmd = getToolCommand(child.name, child.input || {});
+            parts.push(`   ↳ ${childEmoji} \`${childCmd || child.name}\``);
             if (child.resultPreview) {
               for (const line of child.resultPreview.split('\n')) {
-                parts.push(`│   ${line}`);
+                parts.push(`      ${line}`);
               }
             }
           }
@@ -372,9 +375,17 @@ export class TerminalCardRenderer {
               if (agent.usage.duration_ms > 0) stats.push(`${Math.round(agent.usage.duration_ms / 1000)}s`);
             }
             const summary = agent.summary || 'Done';
-            parts.push(`│ └ ${statusIcon} ${summary}${stats.length ? ` · ${stats.join(' · ')}` : ''}`);
+            parts.push(`   ↳ ${statusIcon} ${summary}${stats.length ? ` · ${stats.join(' · ')}` : ''}`);
           }
         }
+
+        // Blank line between tool entries
+        parts.push('');
+      }
+
+      // Remove trailing blank line from tool entries
+      if (parts.length > 0 && parts[parts.length - 1] === '') {
+        parts.pop();
       }
 
       // Show agents without toolUseId (legacy/unlinked agents) as standalone headers
@@ -405,9 +416,9 @@ export class TerminalCardRenderer {
     // Permission section
     if (hasPermission) {
       const p = this.pendingPermission!;
-      parts.push(`🔐 ${p.toolName}`);
-      parts.push(`  ${p.input}`);
-      parts.push(`  ${p.reason}`);
+      parts.push(`🔐 **${p.toolName}**`);
+      if (p.input) parts.push(`\`${p.input.slice(0, 200)}\``);
+      if (p.reason && p.reason !== p.toolName) parts.push(p.reason);
     }
 
     // Question section

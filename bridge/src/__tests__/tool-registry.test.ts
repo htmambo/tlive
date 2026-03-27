@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { getToolIcon, getToolTitle, getToolResultPreview, TOOL_RESULT_MAX_LINES } from '../engine/tool-registry.js';
+import { getToolIcon, getToolTitle, getToolCommand, getToolResultPreview, TOOL_RESULT_MAX_LINES } from '../engine/tool-registry.js';
 
 describe('tool-registry', () => {
   describe('getToolIcon', () => {
@@ -49,6 +49,39 @@ describe('tool-registry', () => {
     });
   });
 
+  describe('getToolCommand', () => {
+    it('returns full file path for Read/Edit/Write', () => {
+      expect(getToolCommand('Read', { file_path: '/home/user/src/main.ts' })).toBe('/home/user/src/main.ts');
+      expect(getToolCommand('Edit', { file_path: '/tmp/bar.ts' })).toBe('/tmp/bar.ts');
+      expect(getToolCommand('Write', { file_path: '/a/b/c.json' })).toBe('/a/b/c.json');
+    });
+
+    it('returns pattern with path for Grep', () => {
+      expect(getToolCommand('Grep', { pattern: 'TODO', path: 'src/' })).toBe('"TODO" in src/');
+      expect(getToolCommand('Grep', { pattern: 'foo' })).toBe('"foo" in .');
+    });
+
+    it('returns pattern for Glob', () => {
+      expect(getToolCommand('Glob', { pattern: '**/*.ts' })).toBe('**/*.ts');
+    });
+
+    it('returns command for Bash (truncated at 80)', () => {
+      expect(getToolCommand('Bash', { command: 'npm test' })).toBe('npm test');
+      const longCmd = 'a'.repeat(100);
+      const result = getToolCommand('Bash', { command: longCmd });
+      expect(result.length).toBe(80);
+      expect(result.endsWith('...')).toBe(true);
+    });
+
+    it('returns description for Agent', () => {
+      expect(getToolCommand('Agent', { description: 'Explore codebase' })).toBe('Explore codebase');
+    });
+
+    it('returns empty string for unknown tools', () => {
+      expect(getToolCommand('CustomTool', {})).toBe('');
+    });
+  });
+
   describe('getToolResultPreview', () => {
     it('returns empty for no-result tools (Read, Glob)', () => {
       expect(getToolResultPreview('Read', 'file content here')).toBe('');
@@ -60,6 +93,10 @@ describe('tool-registry', () => {
       const result = getToolResultPreview('Bash', lines.join('\n'));
       expect(result).toContain('line 1');
       expect(result).toContain(`+${30 - TOOL_RESULT_MAX_LINES} lines`);
+    });
+
+    it('TOOL_RESULT_MAX_LINES is 3', () => {
+      expect(TOOL_RESULT_MAX_LINES).toBe(3);
     });
 
     it('shows short Bash output in full', () => {
