@@ -28,6 +28,11 @@ export class PermissionCoordinator {
   /** Track hook messages for reply routing (permission-adjacent) */
   private hookMessages = new Map<string, { sessionId: string; timestamp: number }>();
 
+  /** Dynamic session whitelist — tools approved via "Allow {tool}" button */
+  private allowedTools = new Set<string>();
+  /** Dynamic Bash prefix whitelist — commands approved via "Allow Bash(prefix *)" */
+  private allowedBashPrefixes = new Set<string>();
+
   constructor(gateway: PendingPermissions, broker: PermissionBroker, coreUrl: string, token: string) {
     this.gateway = gateway;
     this.broker = broker;
@@ -226,6 +231,40 @@ export class PermissionCoordinator {
       await adapter.send({ chatId, text: `❌ Failed to resolve: ${err}` });
     }
     return true;
+  }
+
+  // --- Dynamic session whitelist ---
+
+  /** Check if a tool is allowed by the dynamic session whitelist */
+  isToolAllowed(toolName: string, toolInput: Record<string, unknown>): boolean {
+    if (this.allowedTools.has(toolName)) return true;
+    if (toolName === 'Bash') {
+      const cmd = typeof toolInput.command === 'string' ? toolInput.command : '';
+      const prefix = this.extractBashPrefix(cmd);
+      if (prefix && this.allowedBashPrefixes.has(prefix)) return true;
+    }
+    return false;
+  }
+
+  /** Add a tool to the session whitelist */
+  addAllowedTool(toolName: string): void {
+    this.allowedTools.add(toolName);
+  }
+
+  /** Add a Bash command prefix to the session whitelist */
+  addAllowedBashPrefix(prefix: string): void {
+    this.allowedBashPrefixes.add(prefix);
+  }
+
+  /** Extract the first word of a Bash command as a prefix */
+  extractBashPrefix(command: string): string {
+    return command.trim().split(/\s+/)[0] || '';
+  }
+
+  /** Clear the dynamic session whitelist (called on /new or session expiry) */
+  clearSessionWhitelist(): void {
+    this.allowedTools.clear();
+    this.allowedBashPrefixes.clear();
   }
 
   // --- Broker callback delegation ---

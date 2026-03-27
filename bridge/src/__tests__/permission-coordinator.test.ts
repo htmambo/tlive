@@ -197,4 +197,38 @@ describe('PermissionCoordinator', () => {
       expect(coord.getBroker()).toBe(broker);
     });
   });
+
+  describe('dynamic session whitelist', () => {
+    it('isToolAllowed returns false by default', () => {
+      expect(coord.isToolAllowed('Edit', {})).toBe(false);
+    });
+
+    it('allows tool after addAllowedTool', () => {
+      coord.addAllowedTool('Edit');
+      expect(coord.isToolAllowed('Edit', {})).toBe(true);
+      expect(coord.isToolAllowed('Write', {})).toBe(false);
+    });
+
+    it('allows Bash with matching prefix', () => {
+      coord.addAllowedBashPrefix('npm');
+      expect(coord.isToolAllowed('Bash', { command: 'npm test' })).toBe(true);
+      expect(coord.isToolAllowed('Bash', { command: 'npm install' })).toBe(true);
+      expect(coord.isToolAllowed('Bash', { command: 'git push' })).toBe(false);
+    });
+
+    it('clears whitelist on clearSessionWhitelist', () => {
+      coord.addAllowedTool('Edit');
+      coord.addAllowedBashPrefix('npm');
+      coord.clearSessionWhitelist();
+      expect(coord.isToolAllowed('Edit', {})).toBe(false);
+      expect(coord.isToolAllowed('Bash', { command: 'npm test' })).toBe(false);
+    });
+
+    it('extractBashPrefix gets first word of command', () => {
+      expect(coord.extractBashPrefix('npm test')).toBe('npm');
+      expect(coord.extractBashPrefix('git push origin main')).toBe('git');
+      expect(coord.extractBashPrefix('')).toBe('');
+      expect(coord.extractBashPrefix('   ls -la  ')).toBe('ls');
+    });
+  });
 });
