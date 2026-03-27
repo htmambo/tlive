@@ -8,9 +8,9 @@ import { writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { SDKMessage, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+import type { SDKMessage, PermissionResult, SDKPermissionDenial } from '@anthropic-ai/claude-agent-sdk';
 import { sseEvent } from './sse-utils.js';
-import type { LLMProvider, StreamChatParams } from './base.js';
+import type { LLMProvider, StreamChatParams, StreamChatResult, QueryControls } from './base.js';
 import type { PendingPermissions } from '../permissions/gateway.js';
 
 // ── Auth error classification ──
@@ -100,12 +100,15 @@ export class ClaudeSDKProvider implements LLMProvider {
     }
   }
 
-  streamChat(params: StreamChatParams): ReadableStream<string> {
+  streamChat(params: StreamChatParams): StreamChatResult {
     const pendingPerms = this.pendingPerms;
     const cliPath = this.cliPath;
     const onPermissionTimeout = this.onPermissionTimeout;
 
-    return new ReadableStream({
+    // Query controls exposed for interrupt/stopTask
+    let controls: QueryControls | undefined;
+
+    const stream = new ReadableStream<string>({
       start(controller) {
         (async () => {
           const state: StreamState = {
@@ -142,6 +145,35 @@ export class ClaudeSDKProvider implements LLMProvider {
               model: params.model || undefined,
               resume: params.sessionId || undefined,
               permissionMode: params.permissionMode || undefined,
+              effort: params.effort || undefined,
+              // Enable AI-generated progress summaries for subagents (~30s interval)
+              agentProgressSummaries: true,
+              // Enable prompt suggestions (predicted next user prompt after each turn)
+              promptSuggestions: true,
+              // Use Claude Code's native permission rules for fine-grained control.
+              // Safe read-only tools + safe Bash patterns are pre-approved.
+              // Dangerous operations (write, delete, network) still trigger canUseTool.
+              settings: {
+                permissions: {
+                  allow: [
+                    // Read-only tools — always safe
+                    'Read(*)', 'Glob(*)', 'Grep(*)', 'WebSearch(*)', 'WebFetch(*)',
+                    'Agent(*)', 'Task(*)', 'TodoRead(*)', 'ToolSearch(*)',
+                    // Safe Bash commands — read-only, no side effects
+                    'Bash(cat *)', 'Bash(head *)', 'Bash(tail *)', 'Bash(less *)',
+                    'Bash(wc *)', 'Bash(ls *)', 'Bash(tree *)', 'Bash(find *)',
+                    'Bash(grep *)', 'Bash(rg *)', 'Bash(ag *)',
+                    'Bash(file *)', 'Bash(stat *)', 'Bash(du *)', 'Bash(df *)',
+                    'Bash(which *)', 'Bash(type *)', 'Bash(whereis *)',
+                    'Bash(echo *)', 'Bash(printf *)', 'Bash(date *)',
+                    'Bash(pwd)', 'Bash(whoami)', 'Bash(uname *)', 'Bash(env)',
+                    'Bash(git log *)', 'Bash(git status *)', 'Bash(git diff *)',
+                    'Bash(git show *)', 'Bash(git blame *)', 'Bash(git branch *)',
+                    'Bash(node -v *)', 'Bash(npm list *)', 'Bash(npx tsc *)',
+                    'Bash(go version *)', 'Bash(go list *)',
+                  ],
+                },
+              },
               env: buildSubprocessEnv(),
               stderr: (data: string) => {
                 stderrBuf += data;
@@ -150,15 +182,36 @@ export class ClaudeSDKProvider implements LLMProvider {
               abortController: params.abortSignal
                 ? Object.assign(new AbortController(), { signal: params.abortSignal })
                 : undefined,
-              // Auto-allow all tools at SDK level.
-              // Permissions are handled by Claude Code's hook system:
-              //   PermissionRequest hook → Go Core → IM (Telegram/Discord/Feishu)
-              // If no hook is installed, Claude Code's built-in permission dialog handles it.
               canUseTool: async (
-                _toolName: string,
+                toolName: string,
                 input: Record<string, unknown>,
+                options: { decisionReason?: string; title?: string; suggestions?: unknown[]; signal?: AbortSignal } = {},
               ): Promise<PermissionResult> => {
-                return { behavior: 'allow' as const, updatedInput: input };
+                // If no handler (perm off) → auto-allow
+                if (!params.onPermissionRequest) {
+                  return { behavior: 'allow' as const, updatedInput: input };
+                }
+                // Already aborted by SDK (subagent stopped) → don't bother asking
+                if (options.signal?.aborted) {
+                  return { behavior: 'deny' as const, message: 'Cancelled by SDK' };
+                }
+                const reason = options.decisionReason || options.title || toolName;
+                console.log(`[claude-sdk] canUseTool: ${toolName} → asking user (${reason})`);
+                // Pass abort signal so handler can clean up gateway entry on cancel
+                const decision = await params.onPermissionRequest(toolName, input, reason, options.signal);
+                if (decision === 'allow') {
+                  return { behavior: 'allow' as const, updatedInput: input };
+                }
+                if (decision === 'allow_always') {
+                  // SDK API uses behavior:'allow' + updatedPermissions to persist the rule.
+                  // 'allow_always' is our internal concept, mapped to SDK's permission update mechanism.
+                  return {
+                    behavior: 'allow' as const,
+                    updatedInput: input,
+                    ...(options.suggestions ? { updatedPermissions: options.suggestions } : {}),
+                  } as PermissionResult;
+                }
+                return { behavior: 'deny' as const, message: 'Denied by user via IM' };
               },
             };
 
@@ -171,10 +224,21 @@ export class ClaudeSDKProvider implements LLMProvider {
               options: queryOptions as Parameters<typeof query>[0]['options'],
             });
 
+            // Expose query controls for interrupt/stopTask
+            controls = {
+              interrupt: () => (q as any).interrupt?.() ?? Promise.resolve(),
+              stopTask: (taskId: string) => (q as any).stopTask?.(taskId) ?? Promise.resolve(),
+            };
+
             for await (const msg of q) {
+              // Debug: log message types to diagnose early termination
+              const sub = 'subtype' in msg ? `.${msg.subtype}` : '';
+              const turns = 'num_turns' in msg ? ` turns=${msg.num_turns}` : '';
+              console.log(`[claude-sdk] msg: ${msg.type}${sub}${turns}`);
               handleMessage(msg, controller, state);
             }
 
+            console.log(`[claude-sdk] query ended. streamed=${state.hasStreamedText} text_len=${state.lastAssistantText.length}`);
             controller.close();
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
@@ -209,6 +273,8 @@ export class ClaudeSDKProvider implements LLMProvider {
         })();
       },
     });
+
+    return { stream, controls };
   }
 }
 
@@ -276,6 +342,13 @@ function handleMessage(
 
     case 'result': {
       state.hasReceivedResult = true;
+      // Log permission denials — these explain why Claude may have stopped early
+      const denials = 'permission_denials' in msg && Array.isArray(msg.permission_denials)
+        ? msg.permission_denials as SDKPermissionDenial[]
+        : [];
+      if (denials.length > 0) {
+        console.warn(`[claude-sdk] Permission denials:`, denials.map(d => `${d.tool_name}(${d.tool_use_id})`).join(', '));
+      }
       if (msg.subtype === 'success') {
         controller.enqueue(sseEvent('result', {
           session_id: msg.session_id,
@@ -285,12 +358,25 @@ function handleMessage(
             output_tokens: msg.usage.output_tokens,
             cost_usd: msg.total_cost_usd,
           },
+          permission_denials: denials.length > 0 ? denials : undefined,
         }));
       } else {
         const errors = 'errors' in msg && Array.isArray(msg.errors)
           ? msg.errors.join('; ')
           : 'Unknown error';
-        controller.enqueue(sseEvent('error', errors));
+        // Include permission denials in error message for visibility
+        const denialInfo = denials.length > 0
+          ? ` [denied: ${denials.map(d => d.tool_name).join(', ')}]`
+          : '';
+        controller.enqueue(sseEvent('error', errors + denialInfo));
+      }
+      break;
+    }
+
+    case 'prompt_suggestion': {
+      const m = msg as { suggestion?: string };
+      if (m.suggestion) {
+        controller.enqueue(sseEvent('prompt_suggestion', m.suggestion));
       }
       break;
     }
@@ -300,6 +386,49 @@ function handleMessage(
         controller.enqueue(sseEvent('status', {
           session_id: msg.session_id,
           model: msg.model,
+        }));
+      } else if (msg.subtype === 'task_started') {
+        const m = msg as { description?: string };
+        controller.enqueue(sseEvent('agent_started', { description: m.description || 'Agent' }));
+      } else if (msg.subtype === 'task_progress') {
+        const m = msg as { description?: string; summary?: string; last_tool_name?: string; usage?: { tool_uses: number; duration_ms: number } };
+        controller.enqueue(sseEvent('agent_progress', {
+          // Prefer AI summary (from agentProgressSummaries) over static description
+          description: m.summary || m.description || 'Working...',
+          lastTool: m.last_tool_name,
+          usage: m.usage,
+        }));
+      } else if (msg.subtype === 'task_notification') {
+        const m = msg as { summary?: string; status?: string };
+        controller.enqueue(sseEvent('agent_complete', {
+          summary: m.summary || 'Done',
+          status: m.status || 'completed',
+        }));
+      }
+      break;
+    }
+
+    // Tool-level progress (long-running Bash commands, etc.)
+    case 'tool_progress': {
+      const m = msg as { tool_name?: string; elapsed_time_seconds?: number; task_id?: string };
+      if (m.tool_name && m.elapsed_time_seconds && m.elapsed_time_seconds > 3) {
+        controller.enqueue(sseEvent('tool_progress', {
+          toolName: m.tool_name,
+          elapsed: m.elapsed_time_seconds,
+        }));
+      }
+      break;
+    }
+
+    // API retry (rate limits, server errors)
+    case 'rate_limit_event': {
+      const m = msg as { rate_limit_info?: { status?: string; utilization?: number; resetsAt?: number } };
+      const info = m.rate_limit_info;
+      if (info?.status === 'rejected' || info?.status === 'allowed_warning') {
+        controller.enqueue(sseEvent('rate_limit', {
+          status: info.status,
+          utilization: info.utilization,
+          resetsAt: info.resetsAt,
         }));
       }
       break;

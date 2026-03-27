@@ -343,6 +343,15 @@ export class TelegramAdapter extends BaseChannelAdapter {
     return { messageId: lastMessageId, success: true };
   }
 
+  async deleteMessage(chatId: string, messageId: string): Promise<void> {
+    if (!this.bot) return;
+    try {
+      await this.api.deleteMessage(chatId, parseInt(messageId, 10));
+    } catch {
+      // Non-fatal
+    }
+  }
+
   async editMessage(chatId: string, messageId: string, message: OutboundMessage): Promise<void> {
     if (!this.bot) return;
     const text = message.html ?? message.text ?? '';

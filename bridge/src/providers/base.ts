@@ -1,3 +1,11 @@
+/** Called by canUseTool when permission prompting is enabled. */
+export type PermissionRequestHandler = (
+  toolName: string,
+  toolInput: Record<string, unknown>,
+  promptSentence: string,
+  signal?: AbortSignal,
+) => Promise<'allow' | 'allow_always' | 'deny'>;
+
 export interface StreamChatParams {
   prompt: string;
   workingDirectory: string;
@@ -6,6 +14,10 @@ export interface StreamChatParams {
   permissionMode?: 'acceptEdits' | 'plan' | 'default';
   attachments?: FileAttachment[];
   abortSignal?: AbortSignal;
+  /** When set, canUseTool forwards permission requests through this handler instead of auto-allowing */
+  onPermissionRequest?: PermissionRequestHandler;
+  /** Controls Claude's thinking depth: low/medium/high/max */
+  effort?: 'low' | 'medium' | 'high' | 'max';
 }
 
 export interface FileAttachment {
@@ -15,8 +27,19 @@ export interface FileAttachment {
   base64Data: string;
 }
 
+/** Controls for an active query — interrupt, stop subagents, etc. */
+export interface QueryControls {
+  interrupt(): Promise<void>;
+  stopTask(taskId: string): Promise<void>;
+}
+
+export interface StreamChatResult {
+  stream: ReadableStream<string>;
+  controls?: QueryControls;
+}
+
 export interface LLMProvider {
-  streamChat(params: StreamChatParams): ReadableStream<string>;
+  streamChat(params: StreamChatParams): StreamChatResult;
 }
 
 // SSE event types from Claude SDK / CLI
@@ -42,7 +65,12 @@ export interface PermissionRequestEvent {
 
 export interface ResultEvent {
   type: 'result';
-  data: { session_id: string; is_error: boolean; usage?: { input_tokens: number; output_tokens: number; cost_usd?: number } };
+  data: {
+    session_id: string;
+    is_error: boolean;
+    usage?: { input_tokens: number; output_tokens: number; cost_usd?: number };
+    permission_denials?: Array<{ tool_name: string; tool_use_id: string; tool_input: Record<string, unknown> }>;
+  };
 }
 
 export interface ErrorEvent {

@@ -11,6 +11,9 @@ export abstract class BaseChannelAdapter {
   abstract validateConfig(): string | null;
   abstract isAuthorized(userId: string, chatId: string): boolean;
 
+  /** Delete a message. Override in adapters that support deletion. */
+  async deleteMessage(_chatId: string, _messageId: string): Promise<void> {}
+
   /** Add a reaction emoji to a message. Override in adapters that support reactions. */
   async addReaction(_chatId: string, _messageId: string, _emoji: string): Promise<void> {}
 

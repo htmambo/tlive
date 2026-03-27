@@ -25,6 +25,24 @@ function summarizeToolInput(name: string, input: Record<string, unknown>): strin
   }
 }
 
+/** Build compact tool summary with global counts: "📖 Read ×45 · 🖥️ Bash ×12 · 🔍 Grep ×8 (128 total)" */
+function compactToolSummary(tools: string[]): string {
+  if (tools.length === 0) return '';
+  // Global count per tool name
+  const counts = new Map<string, number>();
+  for (const header of tools) {
+    const match = header.match(/^.+?\s(\w+)/);
+    const name = match?.[1] ?? 'unknown';
+    counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  // Sort by count descending
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  const parts = sorted.map(([name, count]) =>
+    `${getToolEmoji(name)} ${name}${count > 1 ? ` ×${count}` : ''}`
+  );
+  return parts.join(' · ') + (tools.length > 5 ? ` (${tools.length} total)` : '');
+}
+
 interface StreamControllerOptions {
   verboseLevel: VerboseLevel;
   platformLimit: number;
@@ -46,6 +64,7 @@ export class StreamController {
   private pendingFlush = false;
   private lastCostLine?: string;
   private minInitialChars: number;
+  private agentStatus?: string;
 
   get messageId(): string | undefined {
     return this._messageId;
@@ -77,6 +96,22 @@ export class StreamController {
     this.scheduleFlush();
   }
 
+  onAgentProgress(description: string, lastTool?: string, usage?: { tool_uses: number; duration_ms: number }): void {
+    if (this.verboseLevel === 0) return;
+    let status = `🤖 ${description}`;
+    if (lastTool) status += ` → ${getToolEmoji(lastTool)} ${lastTool}`;
+    if (usage) status += ` (${usage.tool_uses} tools, ${Math.round(usage.duration_ms / 1000)}s)`;
+    this.agentStatus = status;
+    this.scheduleFlush();
+  }
+
+  onAgentComplete(summary: string, status: 'completed' | 'failed' | 'stopped'): void {
+    if (this.verboseLevel === 0) return;
+    const icon = status === 'completed' ? '✅' : status === 'failed' ? '❌' : '⏹';
+    this.agentStatus = `${icon} ${summary.slice(0, 100)}`;
+    this.scheduleFlush();
+  }
+
   onComplete(stats: UsageStats): void {
     const costLine = CostTracker.format(stats);
     this.lastCostLine = costLine;
@@ -99,8 +134,11 @@ export class StreamController {
     if (this.timer) return;
     this.timer = setTimeout(() => {
       this.timer = null;
-      // Debounce initial send: wait for enough content before creating the first message
-      if (!this._messageId && this.buffer.length < this.minInitialChars && this.verboseLevel > 0) {
+      // Debounce initial send: wait for enough content before creating the first message.
+      // But always flush if we have tool headers or agent progress — so users see progress
+      // during long tool-use loops even before any text is generated.
+      const hasProgress = this.toolHeaders.length > 0 || !!this.agentStatus;
+      if (!this._messageId && this.buffer.length < this.minInitialChars && !hasProgress && this.verboseLevel > 0) {
         this.scheduleFlush(); // reschedule
         return;
       }
@@ -120,8 +158,12 @@ export class StreamController {
     const parts: string[] = [];
 
     if (this.toolHeaders.length > 0 && this.verboseLevel > 0) {
-      parts.push(this.toolHeaders.join(' → '));
+      parts.push(compactToolSummary(this.toolHeaders));
       parts.push('━━━━━━━━━━━━━━━━━━');
+    }
+
+    if (this.agentStatus && this.verboseLevel > 0) {
+      parts.push(this.agentStatus);
     }
 
     if (this.buffer && this.verboseLevel > 0) {

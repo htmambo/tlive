@@ -220,9 +220,10 @@ export class FeishuAdapter extends BaseChannelAdapter {
     // Register card action handler for button callbacks (schema 2.0 cards)
     eventDispatcher.register({
       'card.action.trigger': async (data: unknown) => {
+        console.log('[feishu] card.action.trigger received:', JSON.stringify(data).slice(0, 300));
         const event = data as { operator?: { user_id?: string; open_id?: string }; action?: { value?: Record<string, string> }; context?: { chat_id?: string; open_message_id?: string } };
         const action = event?.action?.value?.action;
-        if (!action) return;
+        if (!action) { console.warn('[feishu] card.action.trigger: no action value found'); return; }
         const userId = event?.operator?.user_id || event?.operator?.open_id || '';
         const chatId = event?.context?.chat_id || '';
         const messageId = event?.context?.open_message_id || '';
@@ -407,6 +408,15 @@ export class FeishuAdapter extends BaseChannelAdapter {
       return { messageId: String(messageId), success: true };
     } catch (err) {
       throw classifyError('feishu', err);
+    }
+  }
+
+  async deleteMessage(_chatId: string, messageId: string): Promise<void> {
+    if (!this.client) return;
+    try {
+      await this.client.im.message.delete({ path: { message_id: messageId } });
+    } catch {
+      // Non-fatal
     }
   }
 

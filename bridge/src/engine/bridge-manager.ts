@@ -16,6 +16,9 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from '
 import { join, dirname } from 'node:path';
 import { homedir, networkInterfaces } from 'node:os';
 
+/** Bridge commands handled synchronously (don't block adapter loop) */
+const QUICK_COMMANDS = new Set(['/new', '/status', '/verbose', '/hooks', '/sessions', '/session', '/help', '/perm', '/effort', '/stop', '/approve', '/pairings']);
+
 function isPrivateIPv4(ip: string): boolean {
   const parts = ip.split('.').map(Number);
   if (parts.length !== 4) return false;
@@ -63,12 +66,22 @@ export class BridgeManager {
   private token: string;
   private coreAvailable = false;
   private verboseLevels = new Map<string, VerboseLevel>();
+  /** Permission mode: 'on' = smart prompting (default), 'off' = auto-allow all */
+  private permModes = new Map<string, 'on' | 'off'>();
+  /** Effort level per chat: controls Claude's thinking depth */
+  private effortLevels = new Map<string, 'low' | 'medium' | 'high' | 'max'>();
+  /** Track pending SDK permission IDs per chat for text-based resolution (key: stateKey, value: permId) */
+  private pendingSdkPerms = new Map<string, string>();
+  /** Per-chat processing guard — prevents concurrent processMessage for the same session */
+  private processingChats = new Set<string>();
+  /** Active query controls per chat — for /stop command */
+  private activeControls = new Map<string, import('../providers/base.js').QueryControls>();
   private lastActive = new Map<string, number>();
   private lastChatId = new Map<string, string>();
-  /** Deduplicate hook permission resolutions */
-  private resolvedHookIds = new Set<string>();
-  /** Store original permission card text for card updates after approval */
-  private hookPermissionTexts = new Map<string, string>();
+  /** Deduplicate hook permission resolutions (with timestamp for TTL cleanup) */
+  private resolvedHookIds = new Map<string, number>();
+  /** Store original permission card text for card updates after approval (with timestamp) */
+  private hookPermissionTexts = new Map<string, { text: string; ts: number }>();
   /** Pending image attachments waiting for a text message to merge with (key: channelType:chatId) */
   private pendingAttachments = new Map<string, { attachments: import('../channels/types.js').FileAttachment[]; timestamp: number }>();
   /** Discord thread IDs for sessions (key: channelType:chatId, value: threadId) */
@@ -146,6 +159,22 @@ export class BridgeManager {
     this.verboseLevels.set(this.stateKey(channelType, chatId), level);
   }
 
+  getPermMode(channelType: string, chatId: string): 'on' | 'off' {
+    return this.permModes.get(this.stateKey(channelType, chatId)) ?? 'on';
+  }
+
+  private setPermMode(channelType: string, chatId: string, mode: 'on' | 'off'): void {
+    this.permModes.set(this.stateKey(channelType, chatId), mode);
+  }
+
+  private getEffort(channelType: string, chatId: string): 'low' | 'medium' | 'high' | 'max' | undefined {
+    return this.effortLevels.get(this.stateKey(channelType, chatId));
+  }
+
+  private setEffort(channelType: string, chatId: string, level: 'low' | 'medium' | 'high' | 'max'): void {
+    this.effortLevels.set(this.stateKey(channelType, chatId), level);
+  }
+
   private checkAndUpdateLastActive(channelType: string, chatId: string): boolean {
     const key = this.stateKey(channelType, chatId);
     const last = this.lastActive.get(key);
@@ -181,7 +210,19 @@ export class BridgeManager {
 
   /** Store original permission card text for later card update */
   storeHookPermissionText(hookId: string, text: string): void {
-    this.hookPermissionTexts.set(hookId, text);
+    this.hookPermissionTexts.set(hookId, { text, ts: Date.now() });
+    this.pruneStaleEntries();
+  }
+
+  /** Clean up stale entries older than 1 hour */
+  private pruneStaleEntries(): void {
+    const cutoff = Date.now() - 60 * 60 * 1000;
+    for (const [id, ts] of this.resolvedHookIds) {
+      if (ts < cutoff) this.resolvedHookIds.delete(id);
+    }
+    for (const [id, entry] of this.hookPermissionTexts) {
+      if (entry.ts < cutoff) this.hookPermissionTexts.delete(id);
+    }
   }
 
   /** Parse text as a permission decision */
@@ -243,10 +284,29 @@ export class BridgeManager {
       const msg = await adapter.consumeOne();
       if (!msg) { await new Promise(r => setTimeout(r, 100)); continue; }
       console.log(`[${adapter.channelType}] Message from ${msg.userId}: ${msg.text || '(callback)'}`);
-      try {
-        await this.handleInboundMessage(adapter, msg);
-      } catch (err) {
-        console.error(`[${adapter.channelType}] Error handling message:`, err);
+      // Callbacks, commands, and permission text are fast — await them.
+      // Regular messages (Claude queries) are fire-and-forget so they don't
+      // block the loop while waiting for LLM responses or permission approvals.
+      const isQuickMessage = !!msg.callbackData
+        || (msg.text && QUICK_COMMANDS.has(msg.text.split(' ')[0].toLowerCase()))
+        || this.parsePermissionText(msg.text || '') !== null;
+      if (isQuickMessage) {
+        try {
+          await this.handleInboundMessage(adapter, msg);
+        } catch (err) {
+          console.error(`[${adapter.channelType}] Error handling message:`, err);
+        }
+      } else {
+        // Guard: if this chat is already processing a message, tell the user
+        const chatKey = this.stateKey(msg.channelType, msg.chatId);
+        if (this.processingChats.has(chatKey)) {
+          await adapter.send({ chatId: msg.chatId, text: '⏳ Previous message still processing, please wait...' }).catch(() => {});
+          continue;
+        }
+        this.processingChats.add(chatKey);
+        this.handleInboundMessage(adapter, msg)
+          .catch(err => console.error(`[${adapter.channelType}] Error handling message:`, err))
+          .finally(() => this.processingChats.delete(chatKey));
       }
     }
   }
@@ -311,10 +371,25 @@ export class BridgeManager {
     if (msg.text) {
       const decision = this.parsePermissionText(msg.text);
       if (decision) {
-        // Check quote-reply first, fall back to latest pending permission (only if unambiguous)
+        // 1. Try SDK permission gateway — scoped to THIS chat only
+        const chatKey = this.stateKey(msg.channelType, msg.chatId);
+        const pendingPermId = this.pendingSdkPerms.get(chatKey);
+        if (pendingPermId) {
+          const gwDecision = decision === 'deny' ? 'deny' as const
+            : decision === 'allow_always' ? 'allow_always' as const
+            : 'allow' as const;
+          if (this.gateway.resolve(pendingPermId, gwDecision)) {
+            this.pendingSdkPerms.delete(chatKey);
+            // Brief reaction instead of a full card — avoids flooding
+            const emoji = decision === 'deny' ? 'NO' : decision === 'allow_always' ? 'DONE' : 'OK';
+            adapter.addReaction(msg.chatId, msg.messageId, emoji).catch(() => {});
+            return true;
+          }
+        }
+
+        // 2. Try hook permission (via Go Core)
         let permEntry = msg.replyToMessageId ? this.permissionMessages.get(msg.replyToMessageId) : undefined;
         if (!permEntry) {
-          // Only use fallback if exactly one permission is pending (avoid multi-session ambiguity)
           if (this.permissionMessages.size === 1) {
             const latest = this.latestPermission.get(adapter.channelType);
             if (latest) permEntry = this.permissionMessages.get(latest.messageId);
@@ -336,7 +411,6 @@ export class BridgeManager {
             });
             const label = decision === 'deny' ? '❌ Denied' : decision === 'allow_always' ? '📌 Always allowed' : '✅ Allowed';
             await adapter.send({ chatId: msg.chatId, text: label });
-            // Clean up
             for (const [id, e] of this.permissionMessages) {
               if (e.permissionId === permEntry.permissionId) this.permissionMessages.delete(id);
             }
@@ -393,6 +467,15 @@ export class BridgeManager {
 
     // Callback data
     if (msg.callbackData) {
+      // Prompt suggestion callback — re-inject as a normal user message
+      if (msg.callbackData.startsWith('suggest:')) {
+        const suggestion = msg.callbackData.slice('suggest:'.length);
+        // Re-process as a regular text message
+        msg.text = suggestion;
+        msg.callbackData = undefined;
+        return this.handleInboundMessage(adapter, msg);
+      }
+
       // Hook permission callbacks (hook:allow:ID:sessionId, hook:allow_always:ID:sessionId, hook:deny:ID:sessionId)
       if (msg.callbackData.startsWith('hook:')) {
         const parts = msg.callbackData.split(':');
@@ -402,7 +485,7 @@ export class BridgeManager {
 
         // Deduplicate: skip if already resolved
         if (this.resolvedHookIds.has(hookId)) return true;
-        this.resolvedHookIds.add(hookId);
+        this.resolvedHookIds.set(hookId, Date.now());
 
         if (this.coreAvailable) {
           try {
@@ -423,7 +506,8 @@ export class BridgeManager {
             const label = labels[decision] || '✅ Allowed';
             // Rebuild original permission text + disabled buttons showing result
             const permEntry = this.permissionMessages.get(msg.messageId);
-            const originalText = this.hookPermissionTexts.get(hookId) || '';
+            const originalText = this.hookPermissionTexts.get(hookId)?.text || '';
+            this.hookPermissionTexts.delete(hookId);
             await adapter.editMessage(msg.chatId, msg.messageId, {
               chatId: msg.chatId,
               text: originalText + `\n\n${label}`,
@@ -449,20 +533,27 @@ export class BridgeManager {
       }
 
       // Regular permission broker callbacks (perm:allow:ID, perm:deny:ID, perm:allow_session:ID)
+      console.log(`[bridge] Perm callback: ${msg.callbackData}, gateway pending: ${this.gateway.pendingCount()}`);
       const resolved = this.broker.handlePermissionCallback(msg.callbackData);
-      if (resolved) {
-        const action = msg.callbackData.split(':')[1];
-        const label = action === 'deny' ? '❌ Denied' : '✅ Allowed';
-        await adapter.send({ chatId: msg.chatId, text: label });
-      } else {
-        await adapter.send({ chatId: msg.chatId, text: '⚠️ Permission already expired or resolved' });
+      console.log(`[bridge] Perm resolved: ${resolved}`);
+      // Shrink the card to a single line — no "撤回" notice, no flooding.
+      if (msg.messageId) {
+        const action = resolved ? (msg.callbackData.split(':')[1] || 'allow') : 'expired';
+        const label = action === 'deny' ? '❌' : action === 'allow_session' ? '📌' : action === 'expired' ? '⏳' : '✅';
+        adapter.editMessage(msg.chatId, msg.messageId, {
+          chatId: msg.chatId,
+          text: label,
+        }).catch(() => {});
       }
+      // If not resolved (expired/cancelled), silently ignore
       return true;
     }
 
-    // Commands
+    // Bridge commands — only intercept known commands, pass others to Claude Code
     if (msg.text.startsWith('/')) {
-      return this.handleCommand(adapter, msg);
+      const handled = await this.handleCommand(adapter, msg);
+      if (handled) return true;
+      // Unrecognized slash command → fall through to Claude Code
     }
 
     // Check for session expiry (>30 min inactivity) and auto-create new session
@@ -486,7 +577,7 @@ export class BridgeManager {
     }
 
     // Reaction target: for Discord threads, reaction goes on the original channel message
-    const reactionChatId = msg.threadId ? msg.chatId : (threadId ? msg.chatId : msg.chatId);
+    const reactionChatId = msg.chatId;
 
     // Start typing heartbeat (in thread if available)
     const typingTarget = threadId && adapter.channelType === 'discord' ? threadId : msg.chatId;
@@ -581,19 +672,101 @@ export class BridgeManager {
 
     let completedStats: import('./cost-tracker.js').UsageStats | undefined;
 
+    // Build SDK-level permission handler based on /perm mode
+    const permMode = this.getPermMode(msg.channelType, msg.chatId);
+    const sdkPermissionHandler = permMode === 'on'
+      ? async (toolName: string, toolInput: Record<string, unknown>, promptSentence: string, signal?: AbortSignal) => {
+          const permId = `sdk-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          const chatKey = this.stateKey(msg.channelType, msg.chatId);
+          this.pendingSdkPerms.set(chatKey, permId);
+          console.log(`[bridge] Permission request: ${toolName} (${permId}) for ${chatKey}`);
+
+          // If SDK aborts (subagent stopped), clean up gateway entry immediately
+          const abortCleanup = () => {
+            console.log(`[bridge] Permission cancelled by SDK: ${toolName} (${permId})`);
+            this.gateway.resolve(permId, 'deny', 'Cancelled by SDK');
+            this.pendingSdkPerms.delete(chatKey);
+          };
+          if (signal?.aborted) { abortCleanup(); return 'deny' as const; }
+          signal?.addEventListener('abort', abortCleanup, { once: true });
+
+          // Notify user via IM (no terminal URL for SDK permissions)
+          // Only send to channels that have a known chatId — don't use msg.chatId as
+          // fallback for other channels (e.g. feishu chatId would crash telegram send)
+          try {
+            await this.broker.forwardPermissionRequest(
+              { permissionRequestId: permId, toolName, toolInput },
+              (channelType) => channelType === msg.channelType
+                ? msg.chatId
+                : this.getLastChatId(channelType) || '',
+              this.getAdapters(),
+              { showTerminalUrl: false },
+            );
+          } catch (err) {
+            console.warn(`[bridge] Failed to send permission card (continuing): ${err}`);
+          }
+          // Wait for user response (5 min timeout)
+          const result = await this.gateway.waitFor(permId, {
+            timeoutMs: 5 * 60 * 1000,
+            onTimeout: () => {
+              this.pendingSdkPerms.delete(chatKey);
+              console.warn(`[bridge] Permission timeout: ${toolName} (${permId})`);
+            },
+          });
+          signal?.removeEventListener('abort', abortCleanup);
+          this.pendingSdkPerms.delete(chatKey);
+          console.log(`[bridge] Permission resolved: ${toolName} (${permId}) → ${result.behavior}`);
+          return result.behavior as 'allow' | 'allow_always' | 'deny';
+        }
+      : undefined;
+
     try {
       const result = await this.engine.processMessage({
         sessionId: binding.sessionId,
         text: msg.text,
         attachments: msg.attachments,
+        sdkPermissionHandler,
+        effort: this.getEffort(msg.channelType, msg.chatId),
+        onControls: (ctrl) => {
+          const chatKey = this.stateKey(msg.channelType, msg.chatId);
+          this.activeControls.set(chatKey, ctrl);
+        },
         onTextDelta: (delta) => stream.onTextDelta(delta),
         onToolUse: (event) => stream.onToolStart(event.name, event.input as Record<string, unknown>),
+        onAgentProgress: (data) => stream.onAgentProgress(data.description, data.lastTool, data.usage),
+        onAgentComplete: (data) => stream.onAgentComplete(data.summary, data.status as 'completed' | 'failed' | 'stopped'),
+        onToolProgress: (data) => {
+          // Show long-running tool execution (>3s)
+          stream.onAgentProgress(`${data.toolName} running...`, undefined, { tool_uses: 0, duration_ms: data.elapsed * 1000 });
+        },
+        onRateLimit: (data) => {
+          if (data.status === 'rejected') {
+            stream.onTextDelta('\n⚠️ Rate limited. Retrying...\n');
+          } else if (data.status === 'allowed_warning' && data.utilization) {
+            stream.onTextDelta(`\n⚠️ Rate limit: ${Math.round(data.utilization * 100)}% used\n`);
+          }
+        },
         onResult: (event) => {
+          // Log and surface permission denials — these explain incomplete responses
+          if (event.permission_denials?.length) {
+            // Log for debugging but don't show to user — often caused by cancelled subagents
+            console.warn(`[bridge] Permission denials: ${event.permission_denials.map(d => d.tool_name).join(', ')}`);
+          }
           const usage = event.usage ?? { input_tokens: 0, output_tokens: 0 };
           completedStats = costTracker.finish(usage);
           if (verboseLevel > 0) {
             stream.onComplete(completedStats);
           }
+        },
+        onPromptSuggestion: (suggestion) => {
+          // Send as a quick-reply button after the response completes
+          const chatId = threadId && adapter.channelType === 'discord' ? threadId : msg.chatId;
+          const truncated = suggestion.length > 60 ? suggestion.slice(0, 57) + '...' : suggestion;
+          adapter.send({
+            chatId,
+            text: `💡 ${truncated}`,
+            buttons: [{ label: '💡 ' + truncated, callbackData: `suggest:${suggestion.slice(0, 200)}`, style: 'default' as const }],
+          }).catch(() => {});
         },
         onError: (err) => stream.onError(err),
         onPermissionRequest: async (req) => {
@@ -628,6 +801,7 @@ export class BridgeManager {
     } finally {
       clearInterval(typingInterval);
       stream.dispose();
+      this.activeControls.delete(this.stateKey(msg.channelType, msg.chatId));
       // Close Feishu streaming card
       if (feishuSession) {
         feishuSession.close().catch(() => {});
@@ -719,6 +893,55 @@ export class BridgeManager {
           } else {
             await adapter.send({ chatId: msg.chatId, text: usage });
           }
+        }
+        return true;
+      }
+      case '/perm': {
+        const sub = parts[1]?.toLowerCase();
+        if (sub === 'on' || sub === 'off') {
+          this.setPermMode(msg.channelType, msg.chatId, sub);
+          const text = sub === 'on'
+            ? '🔐 Permission prompts: ON — dangerous tools will ask for confirmation'
+            : '⚡ Permission prompts: OFF — all tools auto-allowed';
+          if (adapter.channelType === 'discord') {
+            await adapter.send({ chatId: msg.chatId, embed: { description: text, color: sub === 'on' ? 0xFFA500 : 0x00CC00 } });
+          } else {
+            await adapter.send({ chatId: msg.chatId, text });
+          }
+        } else {
+          const current = this.getPermMode(msg.channelType, msg.chatId);
+          const text = `🔐 Permission mode: **${current}**\nUsage: \`/perm on|off\`\non = prompt for dangerous tools (default)\noff = auto-allow all`;
+          if (adapter.channelType === 'discord') {
+            await adapter.send({ chatId: msg.chatId, embed: { description: text, color: 0x888888 } });
+          } else {
+            await adapter.send({ chatId: msg.chatId, text });
+          }
+        }
+        return true;
+      }
+      case '/stop': {
+        const chatKey = this.stateKey(msg.channelType, msg.chatId);
+        const ctrl = this.activeControls.get(chatKey);
+        if (ctrl) {
+          await ctrl.interrupt();
+          await adapter.send({ chatId: msg.chatId, text: '⏹ Interrupted current execution' });
+        } else {
+          await adapter.send({ chatId: msg.chatId, text: '⚠️ No active execution to stop' });
+        }
+        return true;
+      }
+      case '/effort': {
+        const LEVELS = ['low', 'medium', 'high', 'max'] as const;
+        const level = parts[1]?.toLowerCase();
+        if (level && LEVELS.includes(level as typeof LEVELS[number])) {
+          this.setEffort(msg.channelType, msg.chatId, level as typeof LEVELS[number]);
+          const icons: Record<string, string> = { low: '⚡', medium: '🧠', high: '💪', max: '🔥' };
+          const text = `${icons[level] || '🧠'} Effort: **${level}**`;
+          await adapter.send({ chatId: msg.chatId, text });
+        } else {
+          const current = this.getEffort(msg.channelType, msg.chatId) || 'default';
+          const text = `🧠 Effort: **${current}**\nUsage: \`/effort low|medium|high|max\`\nlow = fast · medium = balanced · high = thorough · max = maximum`;
+          await adapter.send({ chatId: msg.chatId, text });
         }
         return true;
       }
@@ -833,6 +1056,9 @@ export class BridgeManager {
             '<code>/session &lt;n&gt;</code> — Switch to session #n',
             '<code>/verbose 0|1|2</code> — Detail level',
             '  0 = quiet · 1 = normal · 2 = detailed',
+            '<code>/perm on|off</code> — Tool permission prompts',
+            '<code>/effort low|high|max</code> — Thinking depth',
+            '<code>/stop</code> — Interrupt current execution',
             '<code>/hooks pause|resume</code> — Toggle IM approval',
             '<code>/status</code> — Bridge status',
             '<code>/approve &lt;code&gt;</code> — Approve pairing request',
@@ -854,6 +1080,7 @@ export class BridgeManager {
                 '`/session <n>` — Switch to session #n',
                 '`/verbose 0|1|2` — Detail level',
                 '> 0 = quiet · 1 = normal · 2 = detailed',
+                '`/perm on|off` — Tool permission prompts',
                 '`/hooks pause|resume` — Toggle IM approval',
                 '`/status` — Bridge status',
                 '`/approve <code>` — Approve pairing request',
@@ -871,6 +1098,9 @@ export class BridgeManager {
             '/session <n> — Switch to session #n',
             '/verbose 0|1|2 — Detail level',
             '  0 = quiet · 1 = normal · 2 = detailed',
+            '/perm on|off — Tool permission prompts',
+            '/effort low|high|max — Thinking depth',
+            '/stop — Interrupt current execution',
             '/hooks pause|resume — Toggle IM approval',
             '/status — Bridge status',
             '/approve <code> — Approve pairing request',

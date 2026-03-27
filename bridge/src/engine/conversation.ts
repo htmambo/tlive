@@ -1,6 +1,6 @@
 import { getBridgeContext } from '../context.js';
 import { parseSSE } from '../providers/sse-utils.js';
-import type { SSEEvent, FileAttachment, ToolUseEvent, PermissionRequestEvent, ResultEvent } from '../providers/base.js';
+import type { SSEEvent, FileAttachment, ToolUseEvent, PermissionRequestEvent, ResultEvent, PermissionRequestHandler, QueryControls } from '../providers/base.js';
 
 const TEXT_MIME_PREFIXES = ['text/', 'application/json', 'application/xml', 'application/javascript', 'application/typescript', 'application/x-yaml', 'application/toml'];
 
@@ -36,6 +36,16 @@ interface ProcessMessageParams {
   onPermissionRequest?: (event: PermissionRequestEvent['data']) => Promise<void>;
   onResult?: (event: ResultEvent['data']) => void;
   onError?: (error: string) => void;
+  onAgentProgress?: (data: { description: string; lastTool?: string; usage?: { tool_uses: number; duration_ms: number } }) => void;
+  onAgentComplete?: (data: { summary: string; status: string }) => void;
+  onPromptSuggestion?: (suggestion: string) => void;
+  onToolProgress?: (data: { toolName: string; elapsed: number }) => void;
+  onRateLimit?: (data: { status: string; utilization?: number; resetsAt?: number }) => void;
+  /** Receives query controls (interrupt, stopTask) when available */
+  onControls?: (controls: QueryControls) => void;
+  /** SDK-level permission handler — forwarded to streamChat */
+  sdkPermissionHandler?: PermissionRequestHandler;
+  effort?: 'low' | 'medium' | 'high' | 'max';
 }
 
 interface ProcessMessageResult {
@@ -72,15 +82,22 @@ export class ConversationEngine {
       const workDir = session?.workingDirectory ?? defaultWorkdir;
 
       // 5. Stream LLM response (pass images as attachments for vision)
-      const stream = llm.streamChat({
+      const result = llm.streamChat({
         prompt,
         workingDirectory: workDir,
         sessionId: session?.sdkSessionId,
         attachments: imageAttachments?.length ? imageAttachments : undefined,
+        onPermissionRequest: params.sdkPermissionHandler,
+        effort: params.effort,
       });
 
+      // Expose query controls (interrupt, stopTask) to caller
+      if (result.controls) {
+        params.onControls?.(result.controls);
+      }
+
       // 6. Consume stream
-      const reader = stream.getReader();
+      const reader = result.stream.getReader();
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -115,6 +132,22 @@ export class ConversationEngine {
             params.onResult?.(resultData);
             break;
           }
+          case 'agent_started':
+          case 'agent_progress':
+            params.onAgentProgress?.(event.data as { description: string; lastTool?: string; usage?: { tool_uses: number; duration_ms: number } });
+            break;
+          case 'agent_complete':
+            params.onAgentComplete?.(event.data as { summary: string; status: string });
+            break;
+          case 'prompt_suggestion':
+            params.onPromptSuggestion?.(event.data as string);
+            break;
+          case 'tool_progress':
+            params.onToolProgress?.(event.data as { toolName: string; elapsed: number });
+            break;
+          case 'rate_limit':
+            params.onRateLimit?.(event.data as { status: string; utilization?: number; resetsAt?: number });
+            break;
           case 'error':
             params.onError?.(event.data as string);
             break;

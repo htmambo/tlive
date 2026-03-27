@@ -77,6 +77,7 @@ export function formatPermissionCard(data: PermissionCardData, channelType: Chan
       if (data.terminalUrl) {
         parts.push(`\uD83D\uDD17 [Open Terminal](${data.terminalUrl})`);
       }
+      parts.push('', '💬 回复 **allow** / **deny** 审批');
       return {
         text: parts.join('\n'),
         feishuHeader: { template: 'orange', title: '\uD83D\uDD10 Permission Required' },

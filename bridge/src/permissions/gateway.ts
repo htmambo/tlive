@@ -1,5 +1,5 @@
 export interface PermissionResult {
-  behavior: 'allow' | 'deny';
+  behavior: 'allow' | 'allow_always' | 'deny';
   message?: string;
 }
 
@@ -19,28 +19,31 @@ export class PendingPermissions {
     const timeoutMs = options?.timeoutMs ?? this.timeoutMs;
     return new Promise<PermissionResult>((resolve) => {
       const timer = setTimeout(() => {
+        console.log(`[gateway] TIMEOUT: ${toolUseId} (was pending: ${this.pending.has(toolUseId)})`);
         this.pending.delete(toolUseId);
         options?.onTimeout?.(toolUseId);
         resolve({ behavior: 'deny', message: 'Permission request timed out' });
       }, timeoutMs);
       this.pending.set(toolUseId, { resolve, timer });
+      console.log(`[gateway] CREATED: ${toolUseId} (total pending: ${this.pending.size})`);
     });
   }
 
-  resolve(permissionRequestId: string, allowed: boolean, message?: string): boolean {
+  resolve(permissionRequestId: string, decision: 'allow' | 'allow_always' | 'deny', message?: string): boolean {
     const entry = this.pending.get(permissionRequestId);
+    console.log(`[gateway] RESOLVE: ${permissionRequestId} → ${decision} (found: ${!!entry}, total pending: ${this.pending.size})`);
     if (!entry) return false;
     clearTimeout(entry.timer);
-    if (allowed) {
-      entry.resolve({ behavior: 'allow' });
-    } else {
-      entry.resolve({ behavior: 'deny', message: message || 'Denied by user' });
-    }
+    const result: PermissionResult = decision === 'deny'
+      ? { behavior: 'deny', message: message || 'Denied by user' }
+      : { behavior: decision };
+    entry.resolve(result);
     this.pending.delete(permissionRequestId);
     return true;
   }
 
   denyAll(): void {
+    console.log(`[gateway] DENY_ALL: ${this.pending.size} entries`);
     for (const [, entry] of this.pending) {
       clearTimeout(entry.timer);
       entry.resolve({ behavior: 'deny', message: 'Bridge shutting down' });

@@ -13,13 +13,15 @@ export class PermissionBroker {
   async forwardPermissionRequest(
     request: { permissionRequestId: string; toolName: string; toolInput: unknown },
     getChatId: (channelType: string) => string,
-    adapters: BaseChannelAdapter[]
+    adapters: BaseChannelAdapter[],
+    options?: { showTerminalUrl?: boolean },
   ): Promise<void> {
     const inputStr = typeof request.toolInput === 'string'
       ? request.toolInput
       : JSON.stringify(request.toolInput, null, 2);
 
     const { formatPermissionCard } = await import('../formatting/index.js');
+    const showTerminal = options?.showTerminalUrl ?? true;
 
     for (const adapter of adapters) {
       const chatId = getChatId(adapter.channelType);
@@ -31,7 +33,7 @@ export class PermissionBroker {
           toolInput: inputStr,
           permissionId: request.permissionRequestId,
           expiresInMinutes: 5,
-          terminalUrl: this.publicUrl || undefined,
+          terminalUrl: showTerminal ? (this.publicUrl || undefined) : undefined,
         },
         adapter.channelType as import('../channels/types.js').ChannelType,
       );
@@ -53,7 +55,9 @@ export class PermissionBroker {
     if (!match) return false;
 
     const [, action, permId] = match;
-    const allowed = action === 'allow' || action === 'allow_session';
-    return this.gateway.resolve(permId, allowed);
+    const decision = action === 'deny' ? 'deny' as const
+      : action === 'allow_session' ? 'allow_always' as const
+      : 'allow' as const;
+    return this.gateway.resolve(permId, decision);
   }
 }
