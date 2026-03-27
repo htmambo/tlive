@@ -120,6 +120,20 @@ describe('MessageRenderer', () => {
       expect(content).toContain('3s');
       r.dispose();
     });
+
+    it('renders Starting... before any tool', async () => {
+      const r = createRenderer();
+      // Trigger a permission prompt with no tools to force a flush
+      r.onPermissionNeeded('Bash', 'npm test', '123', defaultButtons);
+      await advance(300);
+      // Now resolve the permission to go back to executing phase
+      r.onPermissionResolved();
+      await advance(300);
+      const lastCall = flushCallback.mock.calls[flushCallback.mock.calls.length - 1];
+      const content = lastCall[0] as string;
+      expect(content).toBe('⏳ Starting...');
+      r.dispose();
+    });
   });
 
   // ─── Permission phase ────────────────────────────
