@@ -126,10 +126,11 @@ In Claude Code, start the bridge:
 
 Now open your IM app on your phone and send a message to the bot. Claude Code will receive it, work on the task, and stream the response back to your phone — including tool usage and progress updates.
 
-Use `/verbose 0|1|2` to control how much detail you see:
+Use `/verbose 0|1` to control how much detail you see:
 - `0` — final answer only
-- `1` — tool names (default)
-- `2` — tool names + inputs
+- `1` — terminal card with tool calls + results (default)
+
+Other useful commands: `/runtime claude|codex` (switch provider), `/perm on|off` (permissions), `/effort low|high|max` (thinking depth), `/stop` (interrupt).
 
 ### Feature 3: Hook Approval
 
@@ -160,7 +161,7 @@ tlive logs 50
 
 ## Next Steps
 
-- **Adjust verbose level:** `/verbose 2` in your IM for detailed tool visibility
+- **Adjust verbose level:** `/verbose 1` for terminal card with tool calls and results
 - **Pause hooks when at desk:** `tlive hooks pause` — auto-allows everything so you're not interrupted. `tlive hooks resume` to go back to IM approval.
 - **Access web terminal from phone:** scan the QR code or use the Network URL printed when you start a session
 - **Multiple sessions:** run several `tlive <cmd>` commands — they all show up in a single dashboard
