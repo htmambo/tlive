@@ -66,6 +66,7 @@ export class TerminalCardRenderer {
   private flushing = false;
   private pendingFlush = false;
   private toolIdCounter = 0;
+  private pendingTool?: { entry: ToolEntry; timer: ReturnType<typeof setTimeout> };
 
   get messageId(): string | undefined {
     return this._messageId;
@@ -83,13 +84,46 @@ export class TerminalCardRenderer {
   onToolStart(name: string, input: Record<string, unknown>): string {
     const id = `tool-${++this.toolIdCounter}`;
     const title = getToolTitle(name, input);
-    this.toolEntries.push({ id, name, title, running: true, denied: false });
-    this.enforceWindow();
-    if (this.verboseLevel > 0) this.scheduleFlush();
+    const entry: ToolEntry = { id, name, title, running: true, denied: false };
+
+    // Flush any previous pending tool first
+    this.flushPendingTool();
+
+    if (this.verboseLevel === 0) {
+      // At verbose 0, just track the entry without display
+      this.toolEntries.push(entry);
+      this.enforceWindow();
+      return id;
+    }
+
+    // Buffer for 250ms before displaying
+    this.pendingTool = {
+      entry,
+      timer: setTimeout(() => {
+        this.commitTool(this.pendingTool!.entry);
+        this.pendingTool = undefined;
+      }, 250),
+    };
+
     return id;
   }
 
   onToolComplete(toolUseId: string, result?: string, isError?: boolean): void {
+    // Check if the completing tool is still in the pending buffer
+    if (this.pendingTool?.entry.id === toolUseId) {
+      clearTimeout(this.pendingTool.timer);
+      const entry = this.pendingTool.entry;
+      entry.running = false;
+      if (result) {
+        const preview = getToolResultPreview(entry.name, result, isError);
+        if (preview) entry.resultPreview = preview;
+      }
+      this.commitTool(entry);
+      this.pendingTool = undefined;
+      return;
+    }
+
+    // Normal path for already-displayed tools
     const entry = this.findTool(toolUseId);
     if (!entry) return;
     entry.running = false;
@@ -101,6 +135,17 @@ export class TerminalCardRenderer {
   }
 
   onToolDenied(toolUseId: string): void {
+    if (this.pendingTool?.entry.id === toolUseId) {
+      clearTimeout(this.pendingTool.timer);
+      const entry = this.pendingTool.entry;
+      entry.running = false;
+      entry.denied = true;
+      entry.resultPreview = '❌ Denied';
+      this.commitTool(entry);
+      this.pendingTool = undefined;
+      return;
+    }
+
     const entry = this.findTool(toolUseId);
     if (!entry) return;
     entry.running = false;
@@ -140,6 +185,7 @@ export class TerminalCardRenderer {
     reason: string,
     buttons: Array<{ label: string; callbackData: string; style: string }>,
   ): void {
+    this.flushPendingTool(); // user needs context
     this.pendingPermission = { toolName, input, reason, buttons };
     this.scheduleFlush();
   }
@@ -173,6 +219,7 @@ export class TerminalCardRenderer {
   }
 
   onComplete(stats: UsageStats): void {
+    this.flushPendingTool();
     this.completed = true;
     this.costLine = CostTracker.format(stats);
     this.cancelTimer();
@@ -181,6 +228,7 @@ export class TerminalCardRenderer {
   }
 
   onError(error: string): void {
+    this.flushPendingTool();
     this.errorMessage = error;
     this.cancelTimer();
     const content = this.render();
@@ -193,10 +241,24 @@ export class TerminalCardRenderer {
   }
 
   dispose(): void {
+    this.flushPendingTool();
     this.cancelTimer();
   }
 
   // --- Internal ---
+
+  private flushPendingTool(): void {
+    if (!this.pendingTool) return;
+    clearTimeout(this.pendingTool.timer);
+    this.commitTool(this.pendingTool.entry);
+    this.pendingTool = undefined;
+  }
+
+  private commitTool(entry: ToolEntry): void {
+    this.toolEntries.push(entry);
+    this.enforceWindow();
+    if (this.verboseLevel > 0) this.scheduleFlush();
+  }
 
   private findTool(id: string): ToolEntry | undefined {
     return this.toolEntries.find(e => e.id === id);

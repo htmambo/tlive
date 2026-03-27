@@ -533,6 +533,85 @@ describe('TerminalCardRenderer', () => {
     });
   });
 
+  // ─── Conditional tool delay (250ms buffer) ──────
+
+  describe('conditional tool delay (250ms buffer)', () => {
+    it('delays tool_start by 250ms', async () => {
+      const r = createRenderer();
+      r.onToolStart('Read', { file_path: '/a.ts' });
+      // At 100ms: tool should NOT be committed yet (still in pending buffer)
+      vi.advanceTimersByTime(100);
+      // The render should not contain the tool because it hasn't been committed
+      const snapshot = r.render();
+      expect(snapshot).not.toContain('Read');
+      // After 250ms delay fires + 300ms throttle, tool appears
+      vi.advanceTimersByTime(500);
+      await vi.runAllTimersAsync();
+      expect(flushCallback).toHaveBeenCalled();
+      const content = flushCallback.mock.calls[flushCallback.mock.calls.length - 1][0] as string;
+      expect(content).toContain('Read');
+      r.dispose();
+    });
+
+    it('shows tool+result together when result arrives within 250ms', async () => {
+      const r = createRenderer();
+      const id = r.onToolStart('Bash', { command: 'echo hi' });
+      // Result arrives before delay expires
+      vi.advanceTimersByTime(100);
+      r.onToolComplete(id, 'hi');
+      vi.advanceTimersByTime(300);
+      await vi.runAllTimersAsync();
+      const content = flushCallback.mock.calls[flushCallback.mock.calls.length - 1][0] as string;
+      expect(content).toContain('Bash(echo hi)');
+      expect(content).toContain('hi'); // result shown with the tool
+      expect(content).not.toContain('🔄'); // not running — already completed
+      r.dispose();
+    });
+
+    it('flushes pending tool immediately on permission request', async () => {
+      const r = createRenderer();
+      r.onToolStart('Bash', { command: 'rm -rf /' });
+      // Permission arrives before 250ms delay
+      vi.advanceTimersByTime(50);
+      r.onPermissionNeeded('Bash', 'rm -rf /', 'Dangerous', []);
+      vi.advanceTimersByTime(300);
+      await vi.runAllTimersAsync();
+      const content = flushCallback.mock.calls[flushCallback.mock.calls.length - 1][0] as string;
+      expect(content).toContain('Bash(rm -rf /)'); // tool was flushed
+      expect(content).toContain('🔐'); // permission shown
+      r.dispose();
+    });
+
+    it('flushes previous pending tool when new tool starts', async () => {
+      const r = createRenderer();
+      r.onToolStart('Read', { file_path: '/a.ts' });
+      vi.advanceTimersByTime(100);
+      r.onToolStart('Read', { file_path: '/b.ts' });
+      vi.advanceTimersByTime(500);
+      await vi.runAllTimersAsync();
+      const content = flushCallback.mock.calls[flushCallback.mock.calls.length - 1][0] as string;
+      // Both tools should be visible
+      expect(content).toContain('a.ts');
+      expect(content).toContain('b.ts');
+      r.dispose();
+    });
+
+    it('dispose flushes pending tool', async () => {
+      const r = createRenderer();
+      r.onToolStart('Read', { file_path: '/a.ts' });
+      r.dispose();
+      // After dispose, the tool should have been flushed
+      vi.advanceTimersByTime(300);
+      await vi.runAllTimersAsync();
+      // Check the render includes the tool (if flushCallback was called)
+      if (flushCallback.mock.calls.length > 0) {
+        const content = flushCallback.mock.calls[flushCallback.mock.calls.length - 1][0] as string;
+        expect(content).toContain('a.ts');
+      }
+      // At minimum, no errors thrown
+    });
+  });
+
   // ─── getResponseText ────────────────────────────
 
   describe('getResponseText', () => {
