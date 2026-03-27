@@ -9,7 +9,7 @@ export interface TerminalCardRendererOptions {
   platformLimit: number;
   throttleMs?: number;
   windowSize?: number;
-  flushCallback: (content: string, isEdit: boolean) => Promise<string | void>;
+  flushCallback: (content: string, isEdit: boolean, buttons?: Array<{ label: string; callbackData: string; style: string }>) => Promise<string | void>;
 }
 
 interface ToolEntry {
@@ -468,7 +468,8 @@ export class TerminalCardRenderer {
     this.flushing = true;
     try {
       const isEdit = !!this._messageId;
-      const result = await this.flushCallback(content, isEdit);
+      const buttons = this.pendingPermission?.buttons || this.pendingQuestion?.buttons;
+      const result = await this.flushCallback(content, isEdit, buttons);
       if (!isEdit && typeof result === 'string') {
         this._messageId = result;
       }

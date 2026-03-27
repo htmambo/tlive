@@ -518,7 +518,7 @@ export class BridgeManager {
       platformLimit: platformLimits[adapter.channelType] ?? 4096,
       throttleMs: 300,
       windowSize: windowSizes[adapter.channelType] ?? 8,
-      flushCallback: async (content, isEdit) => {
+      flushCallback: async (content, isEdit, buttons) => {
         // Feishu streaming path
         if (feishuSession) {
           if (!isEdit) {
@@ -542,6 +542,10 @@ export class BridgeManager {
           outMsg = { chatId: msg.chatId, text: content, threadId };
         } else {
           outMsg = { chatId: msg.chatId, text: content, feishuHeader: { template: 'blue', title: '💬 Claude' } };
+        }
+        // Attach buttons if permission/question is pending
+        if (buttons?.length) {
+          outMsg.buttons = buttons.map(b => ({ ...b, style: b.style as 'primary' | 'danger' | 'default' }));
         }
         if (!isEdit) {
           if (adapter.channelType === 'discord' && !threadId && 'createThread' in adapter) {
@@ -614,18 +618,6 @@ export class BridgeManager {
 
           buttons.push({ label: '❌ No', callbackData: `perm:deny:${permId}`, style: 'danger' });
           renderer.onPermissionNeeded(toolName, inputStr, promptSentence, buttons);
-
-          // Send buttons as separate message (IM platforms need interactive buttons)
-          try {
-            const targetChatId = threadId && adapter.channelType === 'discord' ? threadId : msg.chatId;
-            await adapter.send({
-              chatId: targetChatId,
-              text: `🔐 ${toolName}`,
-              buttons: buttons.map(b => ({ ...b, style: b.style as 'primary' | 'danger' | 'default' })),
-            });
-          } catch (err) {
-            console.warn(`[bridge] Failed to send permission buttons: ${err}`);
-          }
 
           // Wait for user response (5 min timeout)
           const result = await this.permissions.getGateway().waitFor(permId, {

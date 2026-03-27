@@ -379,13 +379,13 @@ describe('TerminalCardRenderer', () => {
       r.onToolStart('Read', { file_path: '/tmp/a.ts' });
       vi.advanceTimersByTime(300);
       await vi.runAllTimersAsync();
-      expect(flushCallback).toHaveBeenCalledWith(expect.any(String), false);
+      expect(flushCallback).toHaveBeenCalledWith(expect.any(String), false, undefined);
       expect(r.messageId).toBe('msg-1');
 
       r.onToolStart('Bash', { command: 'echo hi' });
       vi.advanceTimersByTime(300);
       await vi.runAllTimersAsync();
-      expect(flushCallback).toHaveBeenCalledWith(expect.any(String), true);
+      expect(flushCallback).toHaveBeenCalledWith(expect.any(String), true, undefined);
       r.dispose();
     });
 
