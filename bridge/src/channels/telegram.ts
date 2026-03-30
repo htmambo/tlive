@@ -359,10 +359,19 @@ export class TelegramAdapter extends BaseChannelAdapter {
   async editMessage(chatId: string, messageId: string, message: OutboundMessage): Promise<void> {
     if (!this.bot) return;
     const text = message.html ?? message.text ?? '';
+    const opts: Record<string, unknown> = {
+      parse_mode: message.html ? 'HTML' : undefined,
+    };
+    if (message.buttons?.length) {
+      opts.reply_markup = {
+        inline_keyboard: [message.buttons.map(b => {
+          if (b.url) return { text: b.label, url: b.url };
+          return { text: b.label, callback_data: b.callbackData };
+        })],
+      };
+    }
     try {
-      await this.api.editMessageText(chatId, parseInt(messageId, 10), text, {
-        parse_mode: message.html ? 'HTML' : undefined,
-      });
+      await this.api.editMessageText(chatId, parseInt(messageId, 10), text, opts);
     } catch (err: unknown) {
       if (!(err instanceof Error && err.message?.includes('message is not modified'))) throw err;
     }
