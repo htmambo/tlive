@@ -65,12 +65,11 @@ describe('tool-registry', () => {
       expect(getToolCommand('Glob', { pattern: '**/*.ts' })).toBe('**/*.ts');
     });
 
-    it('returns command for Bash (truncated at 80)', () => {
+    it('returns full command for Bash (no truncation)', () => {
       expect(getToolCommand('Bash', { command: 'npm test' })).toBe('npm test');
       const longCmd = 'a'.repeat(100);
       const result = getToolCommand('Bash', { command: longCmd });
-      expect(result.length).toBe(80);
-      expect(result.endsWith('...')).toBe(true);
+      expect(result).toBe(longCmd);
     });
 
     it('returns description for Agent', () => {
