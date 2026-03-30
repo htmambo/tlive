@@ -199,7 +199,7 @@ export class MessageRenderer {
       return this.applyPlatformLimit(redactSensitiveContent(lines.join('\n')));
     }
 
-    // Completed
+    // Completed — no platform limit applied here; bridge-manager handles overflow chunking
     if (this.responseText) {
       lines.push(this.responseText);
       lines.push(SEPARATOR);
@@ -210,7 +210,7 @@ export class MessageRenderer {
     if (this.costLine) {
       lines.push(this.costLine);
     }
-    return this.applyPlatformLimit(redactSensitiveContent(lines.join('\n')));
+    return redactSensitiveContent(lines.join('\n'));
   }
 
   private applyPlatformLimit(content: string): string {

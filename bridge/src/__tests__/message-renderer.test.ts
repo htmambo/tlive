@@ -413,12 +413,26 @@ describe('MessageRenderer', () => {
       r.dispose();
     });
 
-    it('platform limit truncation with ... prefix', async () => {
+    it('done phase passes full content (no platform limit truncation)', async () => {
       const r = createRenderer(200);
       r.onToolStart('Bash');
       r.onTextDelta('x'.repeat(500));
       r.onComplete(defaultStats);
       await advance(0);
+      const content = flushCallback.mock.calls[flushCallback.mock.calls.length - 1][0] as string;
+      // Done phase does NOT truncate — bridge-manager handles overflow chunking
+      expect(content.length).toBeGreaterThan(200);
+      expect(content).toContain('x'.repeat(500));
+      r.dispose();
+    });
+
+    it('executing phase still applies platform limit truncation', async () => {
+      const r = createRenderer(200);
+      // Add many different tool types to exceed the limit
+      for (let i = 0; i < 20; i++) {
+        r.onToolStart(`LongToolName${i}`);
+      }
+      await advance(300);
       const content = flushCallback.mock.calls[flushCallback.mock.calls.length - 1][0] as string;
       expect(content.length).toBeLessThanOrEqual(200);
       expect(content.startsWith('...\n')).toBe(true);

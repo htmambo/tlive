@@ -492,7 +492,6 @@ export class BridgeManager {
     }, 4000);
     adapter.sendTyping(typingTarget).catch(() => {});
 
-    const verboseLevel = this.state.getVerboseLevel(msg.channelType, msg.chatId);
     const costTracker = new CostTracker();
     costTracker.start();
 
