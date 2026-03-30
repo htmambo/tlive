@@ -43,7 +43,18 @@ export function chunkByParagraph(text: string, limit: number): string[] {
       result.push(...chunkMarkdown(chunk, limit));
     }
   }
-  return result;
+
+  // Third pass: merge tiny trailing fragments into previous chunk
+  const MIN_CHUNK = 80;
+  const merged: string[] = [];
+  for (const chunk of result) {
+    if (merged.length > 0 && chunk.length < MIN_CHUNK && merged[merged.length - 1].length + chunk.length + 2 <= limit) {
+      merged[merged.length - 1] += '\n\n' + chunk;
+    } else {
+      merged.push(chunk);
+    }
+  }
+  return merged;
 }
 
 export function chunkMarkdown(text: string, limit: number, maxLines?: number): string[] {

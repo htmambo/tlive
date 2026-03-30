@@ -178,18 +178,22 @@ export class PermissionCoordinator {
   /** Resolve a hook permission via Core API */
   async resolveHookPermission(permissionId: string, decision: string, channelType: string, coreAvailable: boolean): Promise<void> {
     if (!coreAvailable) throw new Error('Go Core not available');
-    await fetch(`${this.coreUrl}/api/hooks/permission/${permissionId}/resolve`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ decision }),
-      signal: AbortSignal.timeout(5000),
-    });
-    // Clean up the resolved permission from tracking maps
-    for (const [id, e] of this.permissionMessages) {
-      if (e.permissionId === permissionId) this.permissionMessages.delete(id);
+    try {
+      await fetch(`${this.coreUrl}/api/hooks/permission/${permissionId}/resolve`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${this.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision }),
+        signal: AbortSignal.timeout(5000),
+      });
+    } finally {
+      // Always clean up tracking maps, even if fetch failed —
+      // stale entries cause worse problems than a missed resolution
+      for (const [id, e] of this.permissionMessages) {
+        if (e.permissionId === permissionId) this.permissionMessages.delete(id);
+      }
+      const latest = this.latestPermission.get(channelType);
+      if (latest?.permissionId === permissionId) this.latestPermission.delete(channelType);
     }
-    const latest = this.latestPermission.get(channelType);
-    if (latest?.permissionId === permissionId) this.latestPermission.delete(channelType);
   }
 
   // --- Hook callback resolution (button-based) ---
