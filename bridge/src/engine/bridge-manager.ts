@@ -534,8 +534,8 @@ export class BridgeManager {
         } catch { /* non-fatal */ }
       },
       flushCallback: async (content, isEdit, buttons) => {
-        // Feishu streaming path
-        if (feishuSession) {
+        // Feishu streaming path — skip when buttons needed (streaming doesn't support buttons)
+        if (feishuSession && !buttons?.length) {
           if (!isEdit) {
             try {
               const messageId = await feishuSession.start(downgradeHeadings(content));
