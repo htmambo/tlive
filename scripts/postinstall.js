@@ -36,8 +36,28 @@ function download(url, dest) {
         file.close();
         return reject(new Error(`Download failed: HTTP ${res.statusCode}`));
       }
+      const total = parseInt(res.headers['content-length'] || '0', 10);
+      let downloaded = 0;
+      let lastPercent = -1;
+      res.on('data', (chunk) => {
+        downloaded += chunk.length;
+        if (total > 0) {
+          const percent = Math.floor(downloaded / total * 100);
+          if (percent !== lastPercent && percent % 5 === 0) {
+            lastPercent = percent;
+            const mb = (downloaded / 1048576).toFixed(1);
+            const totalMb = (total / 1048576).toFixed(1);
+            const bar = '█'.repeat(Math.floor(percent / 5)) + '░'.repeat(20 - Math.floor(percent / 5));
+            process.stdout.write(`\r  ${bar} ${percent}% (${mb}/${totalMb} MB)`);
+          }
+        }
+      });
       res.pipe(file);
-      file.on('finish', () => { file.close(); resolve(); });
+      file.on('finish', () => {
+        if (total > 0) process.stdout.write('\n');
+        file.close();
+        resolve();
+      });
     }).on('error', reject);
   });
 }
