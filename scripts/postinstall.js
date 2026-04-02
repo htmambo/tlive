@@ -15,10 +15,10 @@ const PLATFORM_MAP = { linux: 'linux', darwin: 'darwin', win32: 'windows' };
 const ARCH_MAP = { x64: 'amd64', arm64: 'arm64' };
 
 function getVersion() {
-  // Use package.json version directly — matches the git tag used for releases
+  // Use coreVersion if set, otherwise fall back to package version
   try {
     const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
-    return `v${pkg.version}`;
+    return `v${pkg.coreVersion || pkg.version}`;
   } catch {
     return 'latest';
   }
