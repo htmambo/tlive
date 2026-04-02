@@ -1,24 +1,341 @@
 #!/usr/bin/env node
 // TermLive CLI entry point
 import { execSync, spawn, spawnSync } from 'node:child_process';
-import { join, dirname } from 'node:path';
+import { join, dirname, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync, writeFileSync, readFileSync, unlinkSync, mkdirSync, chmodSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, unlinkSync, mkdirSync, chmodSync, openSync, copyFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const [,, command, ...args] = process.argv;
 
 const SCRIPTS_DIR = __dirname;
-const DAEMON_SH = join(SCRIPTS_DIR, 'daemon.sh');
-const CORE_BIN = join(homedir(), '.tlive', 'bin', 'tlive-core');
 const PACKAGE_ROOT = join(__dirname, '..');
+const isWindows = process.platform === 'win32';
+const TLIVE_HOME = join(homedir(), '.tlive');
+const RUNTIME_DIR = join(TLIVE_HOME, 'runtime');
+const LOG_DIR = join(TLIVE_HOME, 'logs');
+const BRIDGE_PID = join(RUNTIME_DIR, 'bridge.pid');
+const BRIDGE_ENTRY = join(PACKAGE_ROOT, 'bridge', 'dist', 'main.mjs');
+const CONFIG_FILE = join(TLIVE_HOME, 'config.env');
+const CORE_BIN = join(TLIVE_HOME, 'bin', isWindows ? 'tlive-core.exe' : 'tlive-core');
 
 function getVersion() {
   try {
     return JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf-8')).version;
   } catch { return 'unknown'; }
 }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Parse ~/.tlive/config.env (KEY=VALUE lines, supports quotes) */
+function loadConfigEnv() {
+  const env = {};
+  if (!existsSync(CONFIG_FILE)) return env;
+  const content = readFileSync(CONFIG_FILE, 'utf-8');
+  for (const line of content.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let val = trimmed.slice(eq + 1).trim();
+    // Strip surrounding quotes
+    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+      val = val.slice(1, -1);
+    }
+    env[key] = val;
+  }
+  return env;
+}
+
+/** Check whether a PID is alive */
+function isProcessRunning(pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/** Read bridge.pid and return PID if alive, else null */
+function getBridgePid() {
+  if (!existsSync(BRIDGE_PID)) return null;
+  try {
+    const pid = parseInt(readFileSync(BRIDGE_PID, 'utf-8').trim(), 10);
+    if (isNaN(pid)) return null;
+    return isProcessRunning(pid) ? pid : null;
+  } catch { return null; }
+}
+
+/** Ensure runtime and log directories exist */
+function ensureDirs() {
+  mkdirSync(RUNTIME_DIR, { recursive: true });
+  mkdirSync(LOG_DIR, { recursive: true });
+}
+
+// ---------------------------------------------------------------------------
+// Daemon functions
+// ---------------------------------------------------------------------------
+
+function daemonStart() {
+  ensureDirs();
+
+  const existing = getBridgePid();
+  if (existing) {
+    console.log(`Bridge is already running (PID ${existing})`);
+    return;
+  }
+
+  if (!existsSync(BRIDGE_ENTRY)) {
+    console.error('ERROR: Bridge not built.');
+    console.error(`Build: cd ${join(PACKAGE_ROOT, 'bridge')} && npm install && npm run build`);
+    process.exit(1);
+  }
+
+  const config = loadConfigEnv();
+  const runtime = process.env.TL_RUNTIME || config.TL_RUNTIME || 'claude';
+
+  console.log(`Starting Bridge (runtime: ${runtime})...`);
+
+  const logFile = join(LOG_DIR, 'bridge.log');
+  const logFd = openSync(logFile, 'a');
+
+  const env = {
+    ...process.env,
+    ...config,
+    TL_RUNTIME: runtime,
+    TL_DEFAULT_WORKDIR: process.env.TL_DEFAULT_WORKDIR || process.cwd(),
+  };
+
+  const child = spawn(process.execPath, [BRIDGE_ENTRY], {
+    detached: true,
+    stdio: ['ignore', logFd, logFd],
+    env,
+  });
+
+  writeFileSync(BRIDGE_PID, String(child.pid));
+  child.unref();
+
+  console.log(`Bridge started (PID ${child.pid})`);
+}
+
+function daemonStop() {
+  const pid = getBridgePid();
+  if (pid) {
+    console.log(`Stopping Bridge (PID ${pid})...`);
+    try { process.kill(pid); } catch {}
+    try { unlinkSync(BRIDGE_PID); } catch {}
+    console.log('Bridge stopped.');
+  } else {
+    console.log('Bridge is not running.');
+    // Clean up stale pid file
+    try { unlinkSync(BRIDGE_PID); } catch {}
+  }
+}
+
+async function daemonStatus() {
+  console.log('=== TLive Status ===');
+
+  const config = loadConfigEnv();
+  const runtime = process.env.TL_RUNTIME || config.TL_RUNTIME || 'claude';
+  const pid = getBridgePid();
+
+  if (pid) {
+    console.log(`Bridge:       running (PID ${pid}, runtime: ${runtime})`);
+  } else {
+    console.log('Bridge:       not running');
+  }
+
+  // Check Go Core web terminal
+  const port = config.TL_PORT || process.env.TL_PORT || '8080';
+  const token = config.TL_TOKEN || process.env.TL_TOKEN || '';
+  try {
+    const resp = await fetch(`http://localhost:${port}/api/status`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (resp.ok) {
+      console.log(`Web terminal: running at http://localhost:${port}`);
+    } else {
+      console.log('Web terminal: not running (start with: tlive <cmd>)');
+    }
+  } catch {
+    console.log('Web terminal: not running (start with: tlive <cmd>)');
+  }
+}
+
+function daemonLogs(n = 50) {
+  const logFile = join(LOG_DIR, 'bridge.log');
+  console.log(`=== Bridge (last ${n} lines) ===`);
+  if (!existsSync(logFile)) {
+    console.log('(no log file)');
+    return;
+  }
+  try {
+    const content = readFileSync(logFile, 'utf-8');
+    const lines = content.split('\n');
+    // Last n lines (filter trailing empty)
+    const tail = lines.slice(-n - 1).filter((l, i, a) => i < a.length - 1 || l.length > 0);
+    console.log(tail.join('\n'));
+  } catch {
+    console.log('(no log file)');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ensureBridgeRunning — silent auto-start for Go Core wrapping
+// ---------------------------------------------------------------------------
+
+function ensureBridgeRunning() {
+  if (getBridgePid()) return; // already running
+  if (!existsSync(CONFIG_FILE)) return; // no config, skip
+
+  ensureDirs();
+
+  if (!existsSync(BRIDGE_ENTRY)) return;
+
+  const config = loadConfigEnv();
+  const runtime = process.env.TL_RUNTIME || config.TL_RUNTIME || 'claude';
+  const logFile = join(LOG_DIR, 'bridge.log');
+  const logFd = openSync(logFile, 'a');
+
+  const env = {
+    ...process.env,
+    ...config,
+    TL_RUNTIME: runtime,
+    TL_DEFAULT_WORKDIR: process.env.TL_DEFAULT_WORKDIR || process.cwd(),
+  };
+
+  try {
+    const child = spawn(process.execPath, [BRIDGE_ENTRY], {
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      env,
+    });
+    writeFileSync(BRIDGE_PID, String(child.pid));
+    child.unref();
+    console.log('  Bridge auto-started in background');
+  } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// Doctor
+// ---------------------------------------------------------------------------
+
+async function runDoctor() {
+  console.log('=== TermLive Doctor ===\n');
+
+  // Dependencies
+  console.log('Dependencies:');
+
+  console.log(`  node:    ${process.version}`);
+
+  const checkCmd = (name) => {
+    try {
+      const r = spawnSync(isWindows ? 'where' : 'which', [name], { encoding: 'utf-8', timeout: 5000 });
+      return r.status === 0;
+    } catch { return false; }
+  };
+
+  const gitVersion = (() => {
+    try {
+      const r = spawnSync('git', ['--version'], { encoding: 'utf-8', timeout: 5000 });
+      return r.status === 0 ? r.stdout.trim().split('\n')[0] : null;
+    } catch { return null; }
+  })();
+
+  console.log(checkCmd('curl') ? '  curl:    OK' : '  curl:    NOT FOUND');
+  console.log(checkCmd('jq') ? '  jq:      OK' : '  jq:      NOT FOUND (needed for statusline)');
+  console.log(gitVersion ? `  git:     ${gitVersion}` : '  git:     NOT FOUND');
+
+  console.log('');
+
+  // Go Core binary
+  console.log('Go Core:');
+  if (existsSync(CORE_BIN)) {
+    console.log(`  binary:  OK (${CORE_BIN})`);
+  } else {
+    console.log('  binary:  NOT FOUND');
+  }
+
+  console.log('');
+
+  // Config
+  console.log('Config:');
+  if (existsSync(CONFIG_FILE)) {
+    console.log('  config.env: OK');
+    const config = loadConfigEnv();
+    console.log(config.TL_TOKEN ? '  TL_TOKEN: set' : '  TL_TOKEN: NOT SET');
+    console.log(config.TL_TG_BOT_TOKEN ? '  Telegram: configured' : '  Telegram: not configured');
+    console.log(config.TL_DC_BOT_TOKEN ? '  Discord:  configured' : '  Discord:  not configured');
+    console.log(config.TL_FS_APP_ID ? '  Feishu:   configured' : '  Feishu:   not configured');
+  } else {
+    console.log("  config.env: NOT FOUND (run 'npx tlive setup')");
+  }
+
+  console.log('');
+
+  // Processes
+  console.log('Processes:');
+  const bridgePid = getBridgePid();
+  console.log(bridgePid ? `  Bridge:   running (PID ${bridgePid})` : '  Bridge:   not running');
+
+  console.log('');
+
+  // API check
+  const config = existsSync(CONFIG_FILE) ? loadConfigEnv() : {};
+  const port = config.TL_PORT || process.env.TL_PORT || '8080';
+  const token = config.TL_TOKEN || process.env.TL_TOKEN || '';
+  try {
+    const resp = await fetch(`http://localhost:${port}/api/status`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(3000),
+    });
+    if (resp.ok) {
+      const body = await resp.text();
+      console.log('API:');
+      console.log(body);
+    } else {
+      console.log(`API: unreachable (port ${port})`);
+    }
+  } catch {
+    console.log(`API: unreachable (port ${port})`);
+  }
+
+  console.log('');
+
+  // Hook scripts
+  console.log('Hooks:');
+  const binDir = join(TLIVE_HOME, 'bin');
+  for (const name of ['hook-handler.mjs', 'notify-handler.mjs', 'stop-handler.mjs']) {
+    const p = join(binDir, name);
+    console.log(existsSync(p) ? `  ${name}: OK` : `  ${name}: NOT FOUND`);
+  }
+
+  // hooks-paused
+  const pauseFile = join(TLIVE_HOME, 'hooks-paused');
+  console.log(existsSync(pauseFile) ? '  status: paused (auto-allow)' : '  status: active');
+
+  console.log('\n=== Done ===');
+}
+
+// ---------------------------------------------------------------------------
+// Go Core forwarding
+// ---------------------------------------------------------------------------
+
+function runCore(coreArgs) {
+  if (!existsSync(CORE_BIN)) {
+    console.error(`Go Core not found at ${CORE_BIN}`);
+    console.error('Run: npm run setup:core');
+    process.exit(1);
+  }
+  ensureBridgeRunning();
+  const result = spawnSync(CORE_BIN, coreArgs, { stdio: 'inherit' });
+  process.exit(result.status ?? 1);
+}
+
+// ---------------------------------------------------------------------------
+// UI
+// ---------------------------------------------------------------------------
 
 const HELP_TEXT = `TLive — Terminal live monitoring + IM bridge for AI coding tools
 
@@ -67,10 +384,7 @@ In Claude Code (AI-guided):
   /tlive doctor              Diagnose issues + suggest fixes
 `;
 
-// Known subcommands handled by Node.js CLI
 const NODE_COMMANDS = new Set(['setup', 'start', 'stop', 'status', 'logs', 'hooks', 'doctor', 'version', 'update']);
-
-// Commands forwarded to Go Core
 const CORE_COMMANDS = new Set(['install']);
 
 function run(cmd, opts = {}) {
@@ -79,39 +393,6 @@ function run(cmd, opts = {}) {
   } catch (err) {
     process.exit(err.status || 1);
   }
-}
-
-function ensureBridgeRunning() {
-  const pidFile = join(homedir(), '.tlive', 'runtime', 'bridge.pid');
-  if (existsSync(pidFile)) {
-    try {
-      const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
-      process.kill(pid, 0); // check if alive
-      return; // already running
-    } catch {}
-  }
-  // Auto-start Bridge in background
-  const configFile = join(homedir(), '.tlive', 'config.env');
-  if (!existsSync(configFile)) return; // no config, skip
-  try {
-    execSync(`bash ${DAEMON_SH} start`, {
-      stdio: 'ignore',
-      env: { ...process.env, TL_DEFAULT_WORKDIR: process.env.TL_DEFAULT_WORKDIR || process.cwd() },
-    });
-    console.log('  Bridge auto-started in background');
-  } catch {}
-}
-
-function runCore(coreArgs) {
-  if (!existsSync(CORE_BIN)) {
-    console.error(`Go Core not found at ${CORE_BIN}`);
-    console.error('Run: npm run setup:core');
-    process.exit(1);
-  }
-  // Auto-start Bridge when wrapping a command (not for install/setup/help)
-  ensureBridgeRunning();
-  const result = spawnSync(CORE_BIN, coreArgs, { stdio: 'inherit' });
-  process.exit(result.status ?? 1);
 }
 
 function showHelp() {
@@ -154,27 +435,27 @@ switch (command) {
         process.exit(1);
       }
     }
-    run(`bash ${DAEMON_SH} start`);
+    daemonStart();
     break;
   }
 
   case 'stop':
-    run(`bash ${DAEMON_SH} stop`);
+    daemonStop();
     break;
 
   case 'status':
-    run(`bash ${DAEMON_SH} status`);
+    await daemonStatus();
     break;
 
   case 'logs':
-    run(`bash ${DAEMON_SH} logs ${args[0] || '50'}`);
+    daemonLogs(parseInt(args[0], 10) || 50);
     break;
 
   case 'hooks': {
     const hooksSub = args[0];
-    const pauseFile = join(homedir(), '.tlive', 'hooks-paused');
+    const pauseFile = join(TLIVE_HOME, 'hooks-paused');
     if (hooksSub === 'pause') {
-      mkdirSync(join(homedir(), '.tlive'), { recursive: true });
+      mkdirSync(TLIVE_HOME, { recursive: true });
       writeFileSync(pauseFile, '');
       console.log('Hooks paused — all permissions auto-allowed, no notifications.');
     } else if (hooksSub === 'resume') {
@@ -188,7 +469,7 @@ switch (command) {
   }
 
   case 'doctor':
-    run(`bash ${join(SCRIPTS_DIR, 'doctor.sh')}`);
+    await runDoctor();
     break;
 
   case 'version': {
@@ -197,7 +478,7 @@ switch (command) {
     let coreVer = 'not installed';
     if (coreExists) {
       try {
-        const vFile = join(homedir(), '.tlive', 'bin', '.core-version');
+        const vFile = join(TLIVE_HOME, 'bin', '.core-version');
         coreVer = readFileSync(vFile, 'utf-8').trim();
       } catch { coreVer = 'unknown'; }
     }
@@ -226,15 +507,10 @@ switch (command) {
       const updated = execSync('npm view tlive version', { encoding: 'utf-8', timeout: 5000 }).trim();
       console.log(`\nUpdated to ${updated || 'latest'}.`);
       // Restart bridge if running
-      const pidFile = join(homedir(), '.tlive', 'runtime', 'bridge.pid');
-      if (existsSync(pidFile)) {
-        try {
-          const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
-          process.kill(pid, 0);
-          console.log('Restarting bridge...');
-          run(`bash ${DAEMON_SH} stop`);
-          run(`bash ${DAEMON_SH} start`);
-        } catch {}
+      if (getBridgePid()) {
+        console.log('Restarting bridge...');
+        daemonStop();
+        daemonStart();
       }
     } catch (err) {
       console.error(`Update failed: ${err.message || err}`);
@@ -248,9 +524,9 @@ switch (command) {
     if (sub === 'skills') {
       const target = args.includes('--codex') ? 'codex' : 'claude';
       const skillSrc = join(PACKAGE_ROOT, 'SKILL.md');
-      const hookSrc = join(__dirname, 'hook-handler.sh');
-      const notifySrc = join(__dirname, 'notify-handler.sh');
-      const stopSrc = join(__dirname, 'stop-handler.sh');
+      const hookSrc = join(SCRIPTS_DIR, 'hook-handler.mjs');
+      const notifySrc = join(SCRIPTS_DIR, 'notify-handler.mjs');
+      const stopSrc = join(SCRIPTS_DIR, 'stop-handler.mjs');
 
       if (!existsSync(skillSrc)) {
         console.error('SKILL.md not found. Try reinstalling: npm install -g tlive');
@@ -266,31 +542,30 @@ switch (command) {
       const skillDest = target === 'codex'
         ? join(skillDir, 'SKILL.md')
         : join(skillDir, 'tlive.md');
-      const { copyFileSync } = await import('node:fs');
       copyFileSync(skillSrc, skillDest);
       console.log(`Skill installed: ${skillDest}`);
 
-      // Install hook scripts
-      const binDir = join(homedir(), '.tlive', 'bin');
+      // Install hook scripts (.mjs)
+      const binDir = join(TLIVE_HOME, 'bin');
       mkdirSync(binDir, { recursive: true });
       for (const src of [hookSrc, notifySrc, stopSrc]) {
         if (existsSync(src)) {
-          const dest = join(binDir, src.split('/').pop());
+          const dest = join(binDir, basename(src));
           copyFileSync(src, dest);
-          chmodSync(dest, 0o755);
+          if (!isWindows) chmodSync(dest, 0o755);
         }
       }
       console.log(`Hook scripts installed: ${binDir}`);
 
       // Sync reference docs to ~/.tlive/docs/
-      const docsDir = join(homedir(), '.tlive', 'docs');
+      const docsDir = join(TLIVE_HOME, 'docs');
       mkdirSync(docsDir, { recursive: true });
       const refsDir = join(PACKAGE_ROOT, 'references');
       for (const doc of ['setup-guides.md', 'token-validation.md', 'troubleshooting.md']) {
-        const src = join(refsDir, doc);
+        const refSrc = join(refsDir, doc);
         const dest = join(docsDir, doc);
-        if (existsSync(src)) {
-          copyFileSync(src, dest);
+        if (existsSync(refSrc)) {
+          copyFileSync(refSrc, dest);
         }
       }
       console.log(`Reference docs synced: ${docsDir}`);
@@ -305,25 +580,57 @@ switch (command) {
 
         if (!settings.hooks) settings.hooks = {};
 
-        const hookHandlerCmd = join(binDir, 'hook-handler.sh');
-        const notifyHandlerCmd = join(binDir, 'notify-handler.sh');
+        const hookHandlerCmd = `node ${join(binDir, 'hook-handler.mjs')}`;
+        const notifyHandlerCmd = `node ${join(binDir, 'notify-handler.mjs')}`;
+        const stopHandlerCmd = `node ${join(binDir, 'stop-handler.mjs')}`;
 
-        // Check if TLive hooks already configured
-        const hasHook = (type, cmd) => {
+        // Check if TLive hooks already configured (match both legacy .sh and new .mjs)
+        const hasHook = (type) => {
           const entries = settings.hooks[type] || [];
           return entries.some(e => {
-            // Support both flat and nested format
-            if (e.command?.includes('hook-handler.sh') || e.command?.includes('notify-handler.sh')) return true;
-            if (e.hooks) return e.hooks.some(h => h.command?.includes('hook-handler.sh') || h.command?.includes('notify-handler.sh'));
+            const matchCmd = (cmd) =>
+              cmd?.includes('hook-handler.sh') || cmd?.includes('hook-handler.mjs') ||
+              cmd?.includes('notify-handler.sh') || cmd?.includes('notify-handler.mjs') ||
+              cmd?.includes('stop-handler.sh') || cmd?.includes('stop-handler.mjs');
+            if (matchCmd(e.command)) return true;
+            if (e.hooks) return e.hooks.some(h => matchCmd(h.command));
             return false;
           });
         };
 
         let hooksAdded = false;
 
+        // Clean up ALL legacy .sh hooks from every hook type
+        for (const hookType of Object.keys(settings.hooks)) {
+          const before = (settings.hooks[hookType] || []).length;
+          settings.hooks[hookType] = (settings.hooks[hookType] || []).filter(e => {
+            const isLegacySh = (cmd) =>
+              cmd?.includes('hook-handler.sh') || cmd?.includes('notify-handler.sh') || cmd?.includes('stop-handler.sh');
+            if (isLegacySh(e.command)) return false;
+            if (e.hooks) {
+              e.hooks = e.hooks.filter(h => !isLegacySh(h.command));
+              return e.hooks.length > 0;
+            }
+            return true;
+          });
+          if (settings.hooks[hookType].length === 0) delete settings.hooks[hookType];
+          if ((settings.hooks[hookType] || []).length !== before) hooksAdded = true; // force write
+        }
+
+        // Clean up legacy PreToolUse hook if present (replaced by PermissionRequest)
+        if (settings.hooks.PreToolUse) {
+          settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(e => {
+            const matchTlive = (cmd) => cmd?.includes('hook-handler');
+            if (matchTlive(e.command)) return false;
+            if (e.hooks) return !e.hooks.some(h => matchTlive(h.command));
+            return true;
+          });
+          if (settings.hooks.PreToolUse.length === 0) delete settings.hooks.PreToolUse;
+          hooksAdded = true;
+        }
+
         // PermissionRequest: forward Claude Code permission dialogs to IM
-        // (replaces PreToolUse — only fires when permission is actually needed)
-        if (!hasHook('PermissionRequest', hookHandlerCmd)) {
+        if (!hasHook('PermissionRequest')) {
           if (!settings.hooks.PermissionRequest) settings.hooks.PermissionRequest = [];
           settings.hooks.PermissionRequest.push({
             hooks: [{
@@ -335,17 +642,7 @@ switch (command) {
           hooksAdded = true;
         }
 
-        // Clean up legacy PreToolUse hook if present
-        if (settings.hooks.PreToolUse) {
-          settings.hooks.PreToolUse = settings.hooks.PreToolUse.filter(e => {
-            if (e.hooks) return !e.hooks.some(h => h.command?.includes('hook-handler.sh'));
-            return !e.command?.includes('hook-handler.sh');
-          });
-          if (settings.hooks.PreToolUse.length === 0) delete settings.hooks.PreToolUse;
-          hooksAdded = true; // force write to remove legacy
-        }
-
-        if (!hasHook('Notification', notifyHandlerCmd)) {
+        if (!hasHook('Notification')) {
           if (!settings.hooks.Notification) settings.hooks.Notification = [];
           settings.hooks.Notification.push({
             hooks: [{
@@ -357,11 +654,11 @@ switch (command) {
           hooksAdded = true;
         }
 
-        const stopHandlerCmd = join(binDir, 'stop-handler.sh');
-
         const hasStopHook = (settings.hooks.Stop || []).some(e => {
-          if (e.hooks) return e.hooks.some(h => h.command?.includes('stop-handler.sh'));
-          return e.command?.includes('stop-handler.sh');
+          const matchStop = (cmd) => cmd?.includes('stop-handler.sh') || cmd?.includes('stop-handler.mjs');
+          if (matchStop(e.command)) return true;
+          if (e.hooks) return e.hooks.some(h => matchStop(h.command));
+          return false;
         });
 
         if (!hasStopHook) {
