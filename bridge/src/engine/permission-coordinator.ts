@@ -28,7 +28,7 @@ export class PermissionCoordinator {
   /** Track hook messages for reply routing (permission-adjacent) */
   private hookMessages = new Map<string, { sessionId: string; timestamp: number }>();
   /** Store AskUserQuestion data for answer resolution */
-  private hookQuestionData = new Map<string, { questions: Array<{ question: string; header: string; options: Array<{ label: string; description?: string }>; multiSelect: boolean }> }>();
+  private hookQuestionData = new Map<string, { questions: Array<{ question: string; header: string; options: Array<{ label: string; description?: string }>; multiSelect: boolean }>; ts: number }>();
 
   private pruneTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -144,7 +144,7 @@ export class PermissionCoordinator {
 
   /** Store AskUserQuestion data for later answer resolution */
   storeQuestionData(hookId: string, questions: Array<{ question: string; header: string; options: Array<{ label: string; description?: string }>; multiSelect: boolean }>): void {
-    this.hookQuestionData.set(hookId, { questions });
+    this.hookQuestionData.set(hookId, { questions, ts: Date.now() });
   }
 
   /** Store original permission card text for later card update */
@@ -175,6 +175,9 @@ export class PermissionCoordinator {
     }
     for (const [id, entry] of this.hookPermissionTexts) {
       if (entry.ts < cutoff) this.hookPermissionTexts.delete(id);
+    }
+    for (const [id, entry] of this.hookQuestionData) {
+      if (entry.ts < cutoff) this.hookQuestionData.delete(id);
     }
   }
 
@@ -286,10 +289,13 @@ export class PermissionCoordinator {
     coreAvailable: boolean,
   ): Promise<boolean> {
     if (this.resolvedHookIds.has(hookId)) return true;
-    this.resolvedHookIds.set(hookId, Date.now());
 
+    if (!coreAvailable) {
+      await adapter.send({ chatId, text: '❌ Go Core not available' });
+      return true;
+    }
     const questionData = this.hookQuestionData.get(hookId);
-    if (!questionData || !coreAvailable) {
+    if (!questionData) {
       await adapter.send({ chatId, text: '❌ Question data not found' });
       return true;
     }
@@ -297,9 +303,12 @@ export class PermissionCoordinator {
     const q = questionData.questions[0];
     const selected = q.options[optionIndex];
     if (!selected) {
-      await adapter.send({ chatId, text: '❌ Invalid option' });
+      await adapter.send({ chatId, text: `❌ Invalid option (1-${q.options.length})` });
       return true;
     }
+
+    // Mark resolved only after validation passes
+    this.resolvedHookIds.set(hookId, Date.now());
     const answers: Record<string, string> = { [q.question]: selected.label };
     const updatedInput = { questions: questionData.questions, answers };
 
