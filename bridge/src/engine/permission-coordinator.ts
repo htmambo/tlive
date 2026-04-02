@@ -258,16 +258,32 @@ export class PermissionCoordinator {
         deny: '❌ Denied',
       };
       const label = labels[decision] || '✅ Allowed';
-      const originalText = this.hookPermissionTexts.get(hookId)?.text || '';
-      this.hookPermissionTexts.delete(hookId);
-      await adapter.editMessage(chatId, messageId, {
-        chatId,
-        text: originalText + `\n\n${label}`,
-        feishuHeader: {
-          template: decision === 'deny' ? 'red' : 'green',
-          title: label,
-        },
-      });
+
+      // AskUserQuestion cards use hookQuestionData, not hookPermissionTexts
+      if (this.hookQuestionData.has(hookId)) {
+        this.hookQuestionData.delete(hookId);
+        await adapter.editMessage(chatId, messageId, {
+          chatId,
+          text: decision === 'deny' ? '❌ Skipped' : label,
+          buttons: [], // clear buttons
+          feishuHeader: {
+            template: decision === 'deny' ? 'red' : 'green',
+            title: decision === 'deny' ? '❌ Skipped' : label,
+          },
+        });
+      } else {
+        const originalText = this.hookPermissionTexts.get(hookId)?.text || '';
+        this.hookPermissionTexts.delete(hookId);
+        await adapter.editMessage(chatId, messageId, {
+          chatId,
+          text: originalText + `\n\n${label}`,
+          buttons: [], // clear buttons
+          feishuHeader: {
+            template: decision === 'deny' ? 'red' : 'green',
+            title: label,
+          },
+        });
+      }
       // Track confirmation message for reply routing
       if (sessionId) {
         this.trackHookMessage(messageId, sessionId);

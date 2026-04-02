@@ -297,6 +297,8 @@ export class DiscordAdapter extends BaseChannelAdapter {
 
     if (message.buttons?.length) {
       payload.components = DiscordAdapter.buildButtonRows(message.buttons);
+    } else if (message.buttons) {
+      payload.components = []; // clear existing buttons
     }
 
     await existing.edit(payload);
