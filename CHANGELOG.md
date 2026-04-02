@@ -24,6 +24,20 @@ All notable changes to this project will be documented in this file.
 - Codex SDK loaded via dynamic `import()` (pure ESM compatibility fix)
 - `renderDone()` trims response text before separator (prevents missing newline)
 
+## [0.5.0] - 2026-04-03
+
+### Added
+- AskUserQuestion interactive support in IM — question cards with option buttons replace raw JSON permission cards
+- Three interaction modes: button click, numeric reply, free text input
+- Skip button returns allow + empty answers (Claude handles gracefully, no "Permission denied" error)
+- Full support for both SDK mode and Hook mode (Go Core)
+- Telegram, Discord, Feishu all supported with platform-specific formatting
+- Go Core `HookResolution` extended with `updatedInput` for answer passthrough
+- Hook handler passes `updatedInput` back to Claude Code
+- Discord button row auto-splitting (max 5 per ActionRow)
+- `editMessage` clears inline keyboard / buttons on all platforms
+- Pending question detection bypasses "previous message still processing" guard
+
 ## [Unreleased]
 
 ### Added
