@@ -83,7 +83,7 @@ export class BridgeManager {
   /** Cached LLM providers keyed by runtime name */
   private providerCache = new Map<string, LLMProvider>();
   /** SDK AskUserQuestion: store question data and selected option index */
-  private sdkQuestionData = new Map<string, { questions: Array<{ question: string; header: string; options: Array<{ label: string; description?: string }>; multiSelect: boolean }> }>();
+  private sdkQuestionData = new Map<string, { questions: Array<{ question: string; header: string; options: Array<{ label: string; description?: string }>; multiSelect: boolean }>; chatId: string }>();
   private sdkQuestionAnswers = new Map<string, number>();
   private sdkQuestionTextAnswers = new Map<string, string>();
 
@@ -158,15 +158,15 @@ export class BridgeManager {
   }
 
   /** Delegate: store AskUserQuestion data */
-  storeQuestionData(hookId: string, questions: Array<{ question: string; header: string; options: Array<{ label: string; description?: string }>; multiSelect: boolean }>): void {
-    this.permissions.storeQuestionData(hookId, questions);
+  storeQuestionData(hookId: string, questions: Array<{ question: string; header: string; options: Array<{ label: string; description?: string }>; multiSelect: boolean }>, contextSuffix?: string): void {
+    this.permissions.storeQuestionData(hookId, questions, contextSuffix);
   }
 
   /** Find a pending SDK AskUserQuestion for numeric text reply */
-  private findPendingSdkQuestion(_channelType: string, _chatId: string): { permId: string } | null {
-    // Find the most recent pending SDK askq permission
-    for (const [permId] of this.sdkQuestionData) {
-      if (this.permissions.getGateway().isPending(permId)) {
+  private findPendingSdkQuestion(_channelType: string, chatId: string): { permId: string } | null {
+    // Find the most recent pending SDK askq permission scoped to this chat
+    for (const [permId, data] of this.sdkQuestionData) {
+      if (data.chatId === chatId && this.permissions.getGateway().isPending(permId)) {
         return { permId };
       }
     }
@@ -407,26 +407,37 @@ export class BridgeManager {
       const pendingSdkQ = this.findPendingSdkQuestion(adapter.channelType, msg.chatId);
 
       if (pendingHookQ || pendingSdkQ) {
+        // Check if input is a valid in-range numeric option selection
+        let validOptionIndex = -1;
         const numMatch = trimmed.match(/^(\d+)$/);
         if (numMatch) {
-          // Numeric reply — select option by index
-          const optionIndex = parseInt(numMatch[1], 10) - 1;
-          if (optionIndex >= 0) {
-            if (pendingHookQ) {
-              await this.permissions.resolveAskQuestion(
-                pendingHookQ.hookId, optionIndex, pendingHookQ.sessionId,
-                pendingHookQ.messageId, adapter, msg.chatId, this.coreAvailable,
-              );
-              return true;
-            }
-            if (pendingSdkQ) {
-              this.sdkQuestionAnswers.set(pendingSdkQ.permId, optionIndex);
-              this.permissions.getGateway().resolve(pendingSdkQ.permId, 'allow');
-              return true;
-            }
+          const idx = parseInt(numMatch[1], 10) - 1;
+          if (idx >= 0) {
+            // Validate against actual options count to avoid "Selected: ?" for out-of-range numbers
+            const qData = pendingHookQ
+              ? this.permissions.getQuestionData(pendingHookQ.hookId)
+              : pendingSdkQ ? this.sdkQuestionData.get(pendingSdkQ.permId) : null;
+            const optionsCount = qData?.questions?.[0]?.options?.length ?? 0;
+            if (idx < optionsCount) validOptionIndex = idx;
+          }
+        }
+
+        if (validOptionIndex >= 0) {
+          // Numeric reply — select option by validated index
+          if (pendingHookQ) {
+            await this.permissions.resolveAskQuestion(
+              pendingHookQ.hookId, validOptionIndex, pendingHookQ.sessionId,
+              pendingHookQ.messageId, adapter, msg.chatId, this.coreAvailable,
+            );
+            return true;
+          }
+          if (pendingSdkQ) {
+            this.sdkQuestionAnswers.set(pendingSdkQ.permId, validOptionIndex);
+            this.permissions.getGateway().resolve(pendingSdkQ.permId, 'allow');
+            return true;
           }
         } else {
-          // Free text reply — use text as direct answer
+          // Free text reply (including out-of-range numbers) — use text as direct answer
           if (pendingHookQ) {
             await this.permissions.resolveAskQuestionWithText(
               pendingHookQ.hookId, trimmed, pendingHookQ.sessionId,
@@ -567,28 +578,29 @@ export class BridgeManager {
           const optionIndex = parseInt(parts[askqIdx + 1], 10);
           const qData = this.sdkQuestionData.get(permId);
           const selected = qData?.questions?.[0]?.options?.[optionIndex];
+          if (!selected) {
+            // Invalid option index (stale button or tampered data) — ignore
+            return true;
+          }
           this.sdkQuestionAnswers.set(permId, optionIndex);
           this.permissions.getGateway().resolve(permId, 'allow');
-          if (selected) {
-            adapter.editMessage(msg.chatId, msg.messageId, {
-              chatId: msg.chatId,
-              text: `✅ Selected: ${selected.label}`,
-              feishuHeader: { template: 'green', title: `✅ ${selected.label}` },
-            }).catch(() => {});
-          }
+          adapter.editMessage(msg.chatId, msg.messageId, {
+            chatId: msg.chatId,
+            text: `✅ Selected: ${selected.label}`,
+            buttons: [],
+            feishuHeader: { template: 'green', title: `✅ ${selected.label}` },
+          }).catch(() => {});
           return true;
         }
       }
 
-      // SDK AskUserQuestion skip (perm:allow:permId:askq_skip) — resolve with allow + empty answers
+      // SDK AskUserQuestion skip (perm:allow:permId:askq_skip) — resolve with deny so handler returns empty answers
       if (msg.callbackData.includes(':askq_skip')) {
         const parts = msg.callbackData.split(':');
         const skipIdx = parts.indexOf('askq_skip');
         if (skipIdx >= 0) {
           const permId = parts.slice(2, skipIdx).join(':');
-          // Mark as skip so sdkAskQuestionHandler returns empty answers
-          this.sdkQuestionTextAnswers.set(permId, '');
-          this.permissions.getGateway().resolve(permId, 'allow');
+          this.permissions.getGateway().resolve(permId, 'deny', 'Skipped');
           adapter.editMessage(msg.chatId, msg.messageId, {
             chatId: msg.chatId,
             text: '⏭ Skipped',
@@ -855,9 +867,22 @@ export class BridgeManager {
       });
 
       // Store question data for answer resolution
-      this.sdkQuestionData.set(permId, { questions });
+      this.sdkQuestionData.set(permId, { questions, chatId: msg.chatId });
 
-      // Send question card via adapter
+      // Create gateway entry BEFORE sending — prevents race condition where user
+      // replies before waitFor is called, causing isPending() to return false
+      const abortCleanup = () => {
+        this.permissions.getGateway().resolve(permId, 'deny', 'Cancelled');
+        this.sdkQuestionData.delete(permId);
+      };
+      if (signal?.aborted) { abortCleanup(); throw new Error('Cancelled'); }
+      signal?.addEventListener('abort', abortCleanup, { once: true });
+      const waitPromise = this.permissions.getGateway().waitFor(permId, {
+        timeoutMs: 5 * 60 * 1000,
+        onTimeout: () => { this.sdkQuestionData.delete(permId); },
+      });
+
+      // Send question card AFTER gateway entry exists — user replies are now safe
       const hint = msg.channelType === 'feishu'
         ? '\n\n💬 回复数字选择，或直接输入内容'
         : '\n\n💬 Reply with number to select, or type your answer';
@@ -872,31 +897,20 @@ export class BridgeManager {
       const sendResult = await adapter.send(outMsg);
       this.permissions.trackPermissionMessage(sendResult.messageId, permId, binding.sessionId, msg.channelType);
 
-      // Abort handling
-      const abortCleanup = () => {
-        this.permissions.getGateway().resolve(permId, 'deny', 'Cancelled');
-        this.sdkQuestionData.delete(permId);
-      };
-      if (signal?.aborted) { abortCleanup(); throw new Error('Cancelled'); }
-      signal?.addEventListener('abort', abortCleanup, { once: true });
-
-      // Wait for answer (5 min timeout)
-      const result = await this.permissions.getGateway().waitFor(permId, {
-        timeoutMs: 5 * 60 * 1000,
-        onTimeout: () => { this.sdkQuestionData.delete(permId); },
-      });
+      // Await user answer
+      const result = await waitPromise;
       signal?.removeEventListener('abort', abortCleanup);
 
       if (result.behavior === 'deny') {
         this.sdkQuestionData.delete(permId);
-        // Return empty answers instead of throwing — Claude handles gracefully
+        // Throw so provider returns { behavior: 'deny' } — Claude stops asking
         adapter.editMessage(msg.chatId, sendResult.messageId, {
           chatId: msg.chatId,
           text: '⏭ Skipped',
           buttons: [],
           feishuHeader: msg.channelType === 'feishu' ? { template: 'grey', title: '⏭ Skipped' } : undefined,
         }).catch(() => {});
-        return { [q.question]: '' };
+        throw new Error('User skipped question');
       }
 
       // User answered — auto-allow the next tool permission in this query
@@ -912,23 +926,29 @@ export class BridgeManager {
         adapter.editMessage(msg.chatId, sendResult.messageId, {
           chatId: msg.chatId,
           text: `✅ Answer: ${textAnswer.length > 50 ? textAnswer.slice(0, 47) + '...' : textAnswer}`,
+          buttons: [],
           feishuHeader: msg.channelType === 'feishu' ? { template: 'green', title: '✅ Answered' } : undefined,
         }).catch(() => {});
         return { [q.question]: textAnswer };
       }
 
-      // Option index reply
-      const optionIndex = this.sdkQuestionAnswers.get(permId) ?? 0;
+      // Option index reply (button callback already edited the message — skip redundant edit)
+      const optionIndex = this.sdkQuestionAnswers.get(permId);
       this.sdkQuestionAnswers.delete(permId);
-      const selected = q.options[optionIndex];
+      const selected = optionIndex !== undefined ? q.options[optionIndex] : undefined;
+      const answerLabel = selected?.label ?? '';
 
-      adapter.editMessage(msg.chatId, sendResult.messageId, {
-        chatId: msg.chatId,
-        text: `✅ Selected: ${selected?.label ?? '?'}`,
-        feishuHeader: msg.channelType === 'feishu' ? { template: 'green', title: `✅ ${selected?.label ?? '?'}` } : undefined,
-      }).catch(() => {});
+      if (!selected) {
+        // Button callback already edited the card; only update if we somehow have no answer
+        adapter.editMessage(msg.chatId, sendResult.messageId, {
+          chatId: msg.chatId,
+          text: '✅ Answered',
+          buttons: [],
+          feishuHeader: msg.channelType === 'feishu' ? { template: 'green', title: '✅ Answered' } : undefined,
+        }).catch(() => {});
+      }
 
-      return { [q.question]: selected?.label ?? '' };
+      return { [q.question]: answerLabel };
     };
 
     try {

@@ -28,7 +28,7 @@ export class PermissionCoordinator {
   /** Track hook messages for reply routing (permission-adjacent) */
   private hookMessages = new Map<string, { sessionId: string; timestamp: number }>();
   /** Store AskUserQuestion data for answer resolution */
-  private hookQuestionData = new Map<string, { questions: Array<{ question: string; header: string; options: Array<{ label: string; description?: string }>; multiSelect: boolean }>; ts: number }>();
+  private hookQuestionData = new Map<string, { questions: Array<{ question: string; header: string; options: Array<{ label: string; description?: string }>; multiSelect: boolean }>; ts: number; contextSuffix?: string }>();
 
   private pruneTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -143,8 +143,13 @@ export class PermissionCoordinator {
   }
 
   /** Store AskUserQuestion data for later answer resolution */
-  storeQuestionData(hookId: string, questions: Array<{ question: string; header: string; options: Array<{ label: string; description?: string }>; multiSelect: boolean }>): void {
-    this.hookQuestionData.set(hookId, { questions, ts: Date.now() });
+  storeQuestionData(hookId: string, questions: Array<{ question: string; header: string; options: Array<{ label: string; description?: string }>; multiSelect: boolean }>, contextSuffix?: string): void {
+    this.hookQuestionData.set(hookId, { questions, ts: Date.now(), contextSuffix });
+  }
+
+  /** Get stored AskUserQuestion data (for option count validation) */
+  getQuestionData(hookId: string): { questions: Array<{ question: string; header: string; options: Array<{ label: string; description?: string }>; multiSelect: boolean }> } | undefined {
+    return this.hookQuestionData.get(hookId);
   }
 
   /** Store original permission card text for later card update */
@@ -338,13 +343,15 @@ export class PermissionCoordinator {
         body: JSON.stringify({ decision: 'allow', updated_input: updatedInput }),
         signal: AbortSignal.timeout(5000),
       });
+      const ctx = questionData.contextSuffix || '';
       this.hookQuestionData.delete(hookId);
       await adapter.editMessage(chatId, messageId, {
         chatId,
         text: `✅ Selected: ${selected.label}`,
+        buttons: [],
         feishuHeader: {
           template: 'green',
-          title: `✅ ${selected.label}`,
+          title: `✅ Terminal${ctx}`,
         },
       });
       if (sessionId) {
@@ -356,7 +363,8 @@ export class PermissionCoordinator {
     return true;
   }
 
-  /** Handle AskUserQuestion skip — resolve hook with allow + empty answers */
+  /** Handle AskUserQuestion skip — resolve hook with allow + empty answers.
+   *  Hook API has no "skip" concept: deny = hard error, allow + empty = graceful skip. */
   async resolveAskQuestionSkip(
     hookId: string,
     sessionId: string,
@@ -392,12 +400,13 @@ export class PermissionCoordinator {
         body: JSON.stringify({ decision: 'allow', updated_input: updatedInput }),
         signal: AbortSignal.timeout(5000),
       });
+      const ctx = questionData.contextSuffix || '';
       this.hookQuestionData.delete(hookId);
       await adapter.editMessage(chatId, messageId, {
         chatId,
         text: '⏭ Skipped',
         buttons: [],
-        feishuHeader: { template: 'grey', title: '⏭ Skipped' },
+        feishuHeader: { template: 'grey', title: `⏭ Terminal${ctx}` },
       });
       if (sessionId) {
         this.trackHookMessage(messageId, sessionId);
@@ -445,12 +454,14 @@ export class PermissionCoordinator {
         body: JSON.stringify({ decision: 'allow', updated_input: updatedInput }),
         signal: AbortSignal.timeout(5000),
       });
+      const ctx = questionData.contextSuffix || '';
       this.hookQuestionData.delete(hookId);
       const preview = text.length > 50 ? text.slice(0, 47) + '...' : text;
       await adapter.editMessage(chatId, messageId, {
         chatId,
         text: `✅ Answer: ${preview}`,
-        feishuHeader: { template: 'green', title: '✅ Answered' },
+        buttons: [],
+        feishuHeader: { template: 'green', title: `✅ Terminal${ctx}` },
       });
       if (sessionId) {
         this.trackHookMessage(messageId, sessionId);

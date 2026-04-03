@@ -8,7 +8,7 @@ import { PendingPermissions } from './permissions/gateway.js';
 import { BridgeManager, type HookNotificationData } from './engine/bridge-manager.js';
 import { createAdapter } from './channels/index.js';
 import type { ChannelType } from './channels/types.js';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
@@ -106,6 +106,8 @@ let coreClient: CoreClientImpl | null = null;
 
 // Track hook permission IDs already sent to IM (avoid duplicates across polls)
 const sentPermissionIds = new Set<string>();
+// Cache session cwd — a session's cwd never changes after creation
+const sessionCwdCache = new Map<string, string>();
 
 export function isCoreAvailable(): boolean {
   return coreAvailable;
@@ -242,11 +244,36 @@ async function main() {
         permission_suggestions?: unknown[];
         created_at: string;
       }>;
+      if (pending.length === 0) return;
+
+      // Resolve unknown session cwds in one batch (session cwd never changes after creation)
+      const unknownSids = [...new Set(pending.map(p => p.session_id).filter((s): s is string => !!s && !sessionCwdCache.has(s)))];
+      if (unknownSids.length > 0) {
+        try {
+          const sessResp = await fetch(`${config.coreUrl}/api/sessions`, {
+            headers: { Authorization: `Bearer ${config.token}` },
+            signal: AbortSignal.timeout(3000),
+          });
+          if (sessResp.ok) {
+            const sessions = await sessResp.json() as Array<{ id: string; cwd?: string }>;
+            for (const s of sessions) {
+              if (s.cwd) sessionCwdCache.set(s.id, s.cwd);
+            }
+          }
+        } catch { /* non-fatal */ }
+      }
 
       for (const perm of pending) {
         // Check if we already sent this permission to IM (avoid duplicates)
         if (sentPermissionIds.has(perm.id)) continue;
         sentPermissionIds.add(perm.id);
+
+        // Build context label consistent with hook notifications (e.g. "tlive · #5f6dea")
+        const contextParts: string[] = [];
+        const sessionCwd = perm.session_id ? sessionCwdCache.get(perm.session_id) : undefined;
+        if (sessionCwd) contextParts.push(basename(sessionCwd));
+        if (perm.session_id) contextParts.push(`#${perm.session_id.slice(-6)}`);
+        const contextSuffix = contextParts.length > 0 ? ' · ' + contextParts.join(' · ') : '';
 
         // AskUserQuestion — render as interactive question card instead of permission card
         if (perm.tool_name === 'AskUserQuestion') {
@@ -283,7 +310,7 @@ async function main() {
             });
 
             // Store question data for answer resolution
-            manager.storeQuestionData(perm.id, questions);
+            manager.storeQuestionData(perm.id, questions, contextSuffix);
 
             // Send to all active IM adapters
             for (const adapter of manager.getAdapters()) {
@@ -302,7 +329,7 @@ async function main() {
                   receiveIdType: target.receiveIdType,
                   text: questionText + (adapter.channelType !== 'telegram' ? hint : ''),
                   buttons,
-                  feishuHeader: adapter.channelType === 'feishu' ? { template: 'blue', title: '❓ Question' } : undefined,
+                  feishuHeader: adapter.channelType === 'feishu' ? { template: 'blue', title: `❓ Terminal${contextSuffix}` } : undefined,
                 };
                 if (adapter.channelType === 'telegram') {
                   outMsg.html = questionText.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>') + (hints.telegram || '');
@@ -353,7 +380,7 @@ async function main() {
               text: text + (adapter.channelType !== 'telegram' ? hint : ''),
               html: adapter.channelType === 'telegram' ? undefined : undefined,
               buttons,
-              feishuHeader: adapter.channelType === 'feishu' ? { template: 'orange', title: '🔐 Terminal · Permission Required' } : undefined,
+              feishuHeader: adapter.channelType === 'feishu' ? { template: 'orange', title: `🔐 Terminal${contextSuffix}` } : undefined,
             };
             // Telegram: use HTML with the hint
             if (adapter.channelType === 'telegram') {
