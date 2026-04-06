@@ -161,6 +161,24 @@ export class ClaudeAdapter {
 
         if (HIDDEN_TOOLS.has(name)) {
           this.hiddenToolUseIds.add(id);
+
+          // Extract TodoWrite data as todo_update event
+          if (name === 'TodoWrite') {
+            const input = b.input as Record<string, unknown> | undefined;
+            const todos = input?.todos as Array<{ content: string; status: string }> | undefined;
+            if (todos?.length) {
+              const ev: CanonicalEvent = {
+                kind: 'todo_update',
+                todos: todos.map(t => ({
+                  content: t.content,
+                  status: t.status as 'pending' | 'in_progress' | 'completed',
+                })),
+                ...(parentToolUseId ? { parentToolUseId } : {}),
+              };
+              events.push(ev);
+            }
+          }
+
           continue;
         }
 
@@ -239,6 +257,24 @@ export class ClaudeAdapter {
       }))
       : undefined;
 
+    // Extract per-model usage breakdown if available
+    const rawModelUsage = msg.modelUsage as Record<string, {
+      inputTokens?: number; outputTokens?: number;
+      cacheReadInputTokens?: number; cacheCreationInputTokens?: number;
+      costUSD?: number;
+    }> | undefined;
+    const modelUsage = rawModelUsage && Object.keys(rawModelUsage).length > 0
+      ? Object.fromEntries(
+          Object.entries(rawModelUsage).map(([model, u]) => [model, {
+            inputTokens: u.inputTokens ?? 0,
+            outputTokens: u.outputTokens ?? 0,
+            ...(u.cacheReadInputTokens != null ? { cacheReadInputTokens: u.cacheReadInputTokens } : {}),
+            ...(u.cacheCreationInputTokens != null ? { cacheCreationInputTokens: u.cacheCreationInputTokens } : {}),
+            ...(u.costUSD != null ? { costUSD: u.costUSD } : {}),
+          }]),
+        )
+      : undefined;
+
     if (msg.subtype === 'success') {
       const ev: CanonicalEvent = {
         kind: 'query_result',
@@ -248,6 +284,7 @@ export class ClaudeAdapter {
           inputTokens: usage?.input_tokens ?? 0,
           outputTokens: usage?.output_tokens ?? 0,
           ...(msg.total_cost_usd != null ? { costUsd: msg.total_cost_usd as number } : {}),
+          ...(modelUsage ? { modelUsage } : {}),
         },
         ...(denials && denials.length > 0 ? { permissionDenials: denials } : {}),
       };
@@ -267,6 +304,7 @@ export class ClaudeAdapter {
             inputTokens: usage.input_tokens ?? 0,
             outputTokens: usage.output_tokens ?? 0,
             ...(msg.total_cost_usd != null ? { costUsd: msg.total_cost_usd as number } : {}),
+            ...(modelUsage ? { modelUsage } : {}),
           },
           ...(denials && denials.length > 0 ? { permissionDenials: denials } : {}),
         };
@@ -294,7 +332,7 @@ export class ClaudeAdapter {
       case 'init': {
         const apiKeySource = msg.apiKeySource as string | undefined;
         if (apiKeySource) {
-          console.log(`[claude-sdk] Active auth source: ${apiKeySource}`);
+          console.log(`[tlive:sdk] Active auth source: ${apiKeySource}`);
         }
         const ev: CanonicalEvent = {
           kind: 'status',

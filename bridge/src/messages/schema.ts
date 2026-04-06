@@ -56,10 +56,19 @@ const agentCompleteSchema = z.object({
   status: z.enum(['completed', 'failed', 'stopped']),
 }).merge(baseSchema).passthrough();
 
+const modelUsageSchema = z.object({
+  inputTokens: z.number(),
+  outputTokens: z.number(),
+  cacheReadInputTokens: z.number().optional(),
+  cacheCreationInputTokens: z.number().optional(),
+  costUSD: z.number().optional(),
+}).passthrough();
+
 const usageSchema = z.object({
   inputTokens: z.number(),
   outputTokens: z.number(),
   costUsd: z.number().optional(),
+  modelUsage: z.record(z.string(), modelUsageSchema).optional(),
 }).passthrough();
 
 const permissionDenialSchema = z.object({
@@ -91,6 +100,16 @@ const promptSuggestionSchema = z.object({
   suggestion: z.string(),
 }).passthrough();
 
+const todoItemSchema = z.object({
+  content: z.string(),
+  status: z.enum(['pending', 'in_progress', 'completed']),
+}).passthrough();
+
+const todoUpdateSchema = z.object({
+  kind: z.literal('todo_update'),
+  todos: z.array(todoItemSchema),
+}).merge(baseSchema).passthrough();
+
 const rateLimitSchema = z.object({
   kind: z.literal('rate_limit'),
   status: z.string(),
@@ -107,6 +126,7 @@ export const canonicalEventSchema = z.discriminatedUnion('kind', [
   agentStartSchema,
   agentProgressSchema,
   agentCompleteSchema,
+  todoUpdateSchema,
   queryResultSchema,
   errorSchema,
   statusSchema,

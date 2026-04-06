@@ -84,6 +84,7 @@ export class BridgeManager {
       () => this.coreAvailable,
       this.sdkEngine.getActiveControls(),
       this.permissions,
+      (channelType, chatId) => this.sdkEngine.closeSession(channelType, chatId),
     );
     this.callbackRouter = new CallbackRouter(
       this.permissions,
@@ -155,11 +156,13 @@ export class BridgeManager {
       this.runAdapterLoop(adapter);
     }
     this.permissions.startPruning();
+    this.sdkEngine.startSessionPruning();
   }
 
   async stop(): Promise<void> {
     this.running = false;
     this.permissions.stopPruning();
+    this.sdkEngine.stopSessionPruning();
     this.permissions.getGateway().denyAll();
     for (const adapter of this.adapters.values()) {
       await adapter.stop();
@@ -171,9 +174,66 @@ export class BridgeManager {
     return this.hookEngine.sendNotification(adapter, chatId, hook, receiveIdType);
   }
 
+  /** Process queued messages iteratively after current turn completes */
+  private async drainQueue(adapter: BaseChannelAdapter, channelType: string, chatId: string): Promise<void> {
+    let next: InboundMessage | undefined;
+    while ((next = this.sdkEngine.dequeueMessage(channelType, chatId))) {
+      console.log(`[${adapter.channelType}] Processing queued message`);
+      try {
+        await this.handleInboundMessage(adapter, next);
+      } catch (err) {
+        console.error(`[${adapter.channelType}] Error processing queued message:`, err);
+        break;
+      }
+    }
+  }
+
+  /** Wait briefly for follow-up messages from the same user, merge text if they arrive quickly.
+   *  Handles Telegram splitting long messages at 4096 chars. */
+  /** Telegram message length limit — only coalesce if text is near this boundary */
+  private static TG_MSG_LIMIT = 4096;
+
+  private async coalesceMessages(adapter: BaseChannelAdapter, first: InboundMessage): Promise<InboundMessage> {
+    if (!first.text || first.callbackData) return first;
+
+    // Only wait for follow-up parts if message is near Telegram's 4096 char limit
+    if (first.text.length < BridgeManager.TG_MSG_LIMIT - 200) return first;
+
+    // Wait up to 500ms for follow-up parts
+    const parts: string[] = [first.text];
+    const deadline = Date.now() + 500;
+
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 100));
+      const next = await adapter.consumeOne();
+      if (!next) continue;
+
+      // Only merge if same user, same chat, text-only (no callback/command), arrives quickly
+      if (next.userId === first.userId && next.chatId === first.chatId
+          && next.text && !next.callbackData && !next.text.startsWith('/')) {
+        parts.push(next.text);
+        console.log(`[${adapter.channelType}] Coalesced message part (${next.text.length} chars)`);
+      } else {
+        // Different message — put it back by re-processing later
+        // We can't "unget" so we handle it inline
+        // For simplicity, process it in the next loop iteration by pushing to a buffer
+        this.coalescePushback.set(adapter.channelType, next);
+        break;
+      }
+    }
+
+    if (parts.length === 1) return first;
+    console.log(`[${adapter.channelType}] Merged ${parts.length} message parts (${parts.reduce((s, p) => s + p.length, 0)} chars total)`);
+    return { ...first, text: parts.join('\n') };
+  }
+
+  private coalescePushback = new Map<string, InboundMessage>();
+
   private async runAdapterLoop(adapter: BaseChannelAdapter): Promise<void> {
     while (this.running) {
-      const msg = await adapter.consumeOne();
+      // Check pushback from coalescing first
+      let msg = this.coalescePushback.get(adapter.channelType) ?? await adapter.consumeOne();
+      this.coalescePushback.delete(adapter.channelType);
       if (!msg) { await new Promise(r => setTimeout(r, 100)); continue; }
       console.log(`[${adapter.channelType}] Message from ${msg.userId}: ${msg.text || '(callback)'}`);
       // Callbacks, commands, and permission text are fast — await them.
@@ -192,14 +252,29 @@ export class BridgeManager {
           console.error(`[${adapter.channelType}] Error handling message:`, err);
         }
       } else {
-        // Guard: if this chat is already processing a message, tell the user
-        const chatKey = this.state.stateKey(msg.channelType, msg.chatId);
+        // Coalesce rapid-fire messages (e.g. Telegram splits long text at 4096 chars)
+        // Wait briefly and merge any follow-up messages from the same user/chat
+        const coalesced = await this.coalesceMessages(adapter, msg);
+
+        // Guard: if this chat is already processing a message
+        const chatKey = this.state.stateKey(coalesced.channelType, coalesced.chatId);
         if (this.state.isProcessing(chatKey)) {
-          await adapter.send({ chatId: msg.chatId, text: '⏳ Previous message still processing, please wait...' }).catch(() => {});
+          if (coalesced.text && this.sdkEngine.canSteer(coalesced.channelType, coalesced.chatId, coalesced.replyToMessageId)) {
+            this.sdkEngine.steer(coalesced.channelType, coalesced.chatId, coalesced.text);
+            await adapter.send({ chatId: coalesced.chatId, text: '💬 Message sent to active session' }).catch(() => {});
+          } else if (coalesced.text) {
+            const queued = this.sdkEngine.queueMessage(coalesced.channelType, coalesced.chatId, coalesced);
+            if (queued) {
+              await adapter.send({ chatId: coalesced.chatId, text: '📥 Queued — will process after current task' }).catch(() => {});
+            } else {
+              await adapter.send({ chatId: coalesced.chatId, text: '⚠️ Queue full — please wait for current tasks to finish' }).catch(() => {});
+            }
+          }
           continue;
         }
         this.state.setProcessing(chatKey, true);
-        this.handleInboundMessage(adapter, msg)
+        this.handleInboundMessage(adapter, coalesced)
+          .then(() => this.drainQueue(adapter, coalesced.channelType, coalesced.chatId))
           .catch(err => console.error(`[${adapter.channelType}] Error handling message:`, err))
           .finally(() => this.state.setProcessing(chatKey, false));
       }
@@ -221,6 +296,13 @@ export class BridgeManager {
     if (msg.text?.startsWith('/')) {
       const handled = await this.commands.handle(adapter, msg);
       if (handled) return true;
+
+      // Unrecognized slash command — check if provider supports passthrough
+      const provider = this.getProvider(msg.channelType, msg.chatId);
+      if (!provider.capabilities().slashCommands) {
+        await adapter.send({ chatId: msg.chatId, text: '⚠️ Slash commands not supported by current runtime' });
+        return true;
+      }
     }
 
     // SDK conversation — delegate to SDKEngine

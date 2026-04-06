@@ -1,6 +1,6 @@
 import { getBridgeContext } from '../context.js';
 import type { CanonicalEvent } from '../messages/schema.js';
-import type { LLMProvider, FileAttachment, PermissionRequestHandler, QueryControls } from '../providers/base.js';
+import type { LLMProvider, FileAttachment, PermissionRequestHandler, QueryControls, StreamChatResult } from '../providers/base.js';
 import type { AskUserQuestionHandler } from '../messages/types.js';
 
 const TEXT_MIME_PREFIXES = ['text/', 'application/json', 'application/xml', 'application/javascript', 'application/typescript', 'application/x-yaml', 'application/toml'];
@@ -35,13 +35,14 @@ interface ProcessMessageParams {
   onTextDelta?: (delta: string) => void;
   onToolStart?: (event: { id: string; name: string; input: Record<string, unknown> }) => void;
   onToolResult?: (event: { toolUseId: string; content: string; isError: boolean }) => void;
-  onQueryResult?: (event: { sessionId: string; isError: boolean; usage: { inputTokens: number; outputTokens: number; costUsd?: number }; permissionDenials?: Array<{ toolName: string; toolUseId: string }> }) => void;
+  onQueryResult?: (event: { sessionId: string; isError: boolean; usage: { inputTokens: number; outputTokens: number; costUsd?: number; modelUsage?: Record<string, { inputTokens: number; outputTokens: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number; costUSD?: number }> }; permissionDenials?: Array<{ toolName: string; toolUseId: string }> }) => void;
   onError?: (error: string) => void;
   onAgentStart?: (data: { description: string; taskId?: string }) => void;
   onAgentProgress?: (data: { description: string; lastTool?: string; usage?: { toolUses: number; durationMs: number } }) => void;
   onAgentComplete?: (data: { summary: string; status: string }) => void;
   onPromptSuggestion?: (suggestion: string) => void;
   onToolProgress?: (data: { toolName: string; elapsed: number }) => void;
+  onTodoUpdate?: (todos: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' }>) => void;
   onRateLimit?: (data: { status: string; utilization?: number; resetsAt?: number }) => void;
   /** Receives query controls (interrupt, stopTask) when available */
   onControls?: (controls: QueryControls) => void;
@@ -54,6 +55,8 @@ interface ProcessMessageParams {
   model?: string;
   /** Override LLM provider (for per-chat runtime selection) */
   llm?: LLMProvider;
+  /** Pre-built stream from LiveSession.startTurn() — skips llm.streamChat() */
+  streamResult?: StreamChatResult;
 }
 
 interface ProcessMessageResult {
@@ -90,8 +93,8 @@ export class ConversationEngine {
       const session = await store.getSession(params.sessionId);
       const workDir = session?.workingDirectory ?? defaultWorkdir;
 
-      // 5. Stream LLM response (pass images as attachments for vision)
-      const result = llm.streamChat({
+      // 5. Stream LLM response — use pre-built stream from LiveSession or call streamChat
+      const result = params.streamResult ?? llm.streamChat({
         prompt,
         workingDirectory: workDir,
         model: params.model,
@@ -155,6 +158,9 @@ export class ConversationEngine {
             break;
           case 'tool_progress':
             params.onToolProgress?.(value);
+            break;
+          case 'todo_update':
+            params.onTodoUpdate?.(value.todos);
             break;
           case 'rate_limit':
             params.onRateLimit?.(value);

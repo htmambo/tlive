@@ -4,41 +4,17 @@
  */
 
 import { execSync } from 'node:child_process';
-import { existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { tmpdir } from 'node:os';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { ClaudeAdapter } from '../messages/claude-adapter.js';
 import type { CanonicalEvent } from '../messages/schema.js';
-import type { LLMProvider, StreamChatParams, StreamChatResult, QueryControls } from './base.js';
+import type { LLMProvider, StreamChatParams, StreamChatResult, QueryControls, ProviderCapabilities, LiveSession } from './base.js';
+import { ClaudeLiveSession } from './claude-live-session.js';
 import type { PendingPermissions } from '../permissions/gateway.js';
 import type { ClaudeSettingSource } from '../config.js';
-
-// ── Auth error classification ──
-
-const CLI_AUTH_PATTERNS = [/not logged in/i, /please run \/login/i];
-const API_AUTH_PATTERNS = [/unauthorized/i, /invalid.*api.?key/i, /401\b/];
-
-function classifyAuthError(text: string): 'cli' | 'api' | false {
-  if (CLI_AUTH_PATTERNS.some(re => re.test(text))) return 'cli';
-  if (API_AUTH_PATTERNS.some(re => re.test(text))) return 'api';
-  return false;
-}
-
-// ── Environment isolation ──
-
-const ENV_ALWAYS_STRIP = ['CLAUDECODE'];
-
-function buildSubprocessEnv(): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (v === undefined) continue;
-    if (ENV_ALWAYS_STRIP.some(prefix => k.startsWith(prefix))) continue;
-    out[k] = v;
-  }
-  return out;
-}
+import { buildSubprocessEnv, preparePromptWithImages, SAFE_PERMISSIONS, classifyAuthError } from './claude-shared.js';
 
 // ── CLI discovery and version check ──
 
@@ -113,16 +89,16 @@ export class ClaudeSDKProvider implements LLMProvider {
     if (this.cliPath) {
       const check = checkCliVersion(this.cliPath);
       if (!check.ok) {
-        console.warn(`[claude-sdk] CLI preflight warning: ${check.error}`);
+        console.warn(`[tlive:sdk] CLI preflight warning: ${check.error}`);
       } else {
-        console.log(`[claude-sdk] Using Claude CLI ${check.version} at ${this.cliPath}`);
+        console.log(`[tlive:sdk] Using Claude CLI ${check.version} at ${this.cliPath}`);
       }
     } else {
-      console.warn('[claude-sdk] Claude CLI not found — SDK will use default resolution');
+      console.warn('[tlive:sdk] Claude CLI not found — SDK will use default resolution');
     }
 
     const srcLabel = this.settingSources.length > 0 ? this.settingSources.join(', ') : 'none (isolation mode)';
-    console.log(`[claude-sdk] Settings sources: ${srcLabel}`);
+    console.log(`[tlive:sdk] Settings sources: ${srcLabel}`);
   }
 
   getSettingSources(): ClaudeSettingSource[] {
@@ -132,7 +108,32 @@ export class ClaudeSDKProvider implements LLMProvider {
   setSettingSources(sources: ClaudeSettingSource[]): void {
     this.settingSources = [...sources];
     const label = sources.length > 0 ? sources.join(', ') : 'none (isolation mode)';
-    console.log(`[claude-sdk] Settings sources changed: ${label}`);
+    console.log(`[tlive:sdk] Settings sources changed: ${label}`);
+  }
+
+  capabilities(): ProviderCapabilities {
+    return {
+      slashCommands: true,
+      askUserQuestion: true,
+      liveSession: true,
+      todoTracking: true,
+      costInUsd: true,
+      skills: true,
+      sessionResume: true,
+    };
+  }
+
+  createSession(params: { workingDirectory: string; sessionId?: string; effort?: 'low' | 'medium' | 'high' | 'max'; model?: string }): LiveSession {
+    return new ClaudeLiveSession({
+      workingDirectory: params.workingDirectory,
+      sessionId: params.sessionId,
+      cliPath: this.cliPath,
+      settingSources: this.settingSources,
+      pendingPerms: this.pendingPerms,
+      onPermissionTimeout: this.onPermissionTimeout,
+      effort: params.effort,
+      model: params.model,
+    });
   }
 
   streamChat(params: StreamChatParams): StreamChatResult {
@@ -156,25 +157,7 @@ export class ClaudeSDKProvider implements LLMProvider {
           let stderrBuf = '';
 
           try {
-            // Save image attachments to temp files so Claude Code can read them
-            let prompt = params.prompt;
-            if (params.attachments?.length) {
-              const imgDir = join(tmpdir(), 'tlive-images');
-              mkdirSync(imgDir, { recursive: true });
-              const imagePaths: string[] = [];
-              for (const att of params.attachments) {
-                if (att.type === 'image') {
-                  const ext = att.mimeType === 'image/png' ? '.png' : att.mimeType === 'image/gif' ? '.gif' : '.jpg';
-                  const filePath = join(imgDir, `img-${Date.now()}-${Math.random().toString(36).slice(2, 6)}${ext}`);
-                  writeFileSync(filePath, Buffer.from(att.base64Data, 'base64'));
-                  imagePaths.push(filePath);
-                }
-              }
-              if (imagePaths.length > 0) {
-                const imageRefs = imagePaths.map(p => p).join('\n');
-                prompt = `[User sent ${imagePaths.length} image(s) — read them to see the content]\n${imageRefs}\n\n${prompt}`;
-              }
-            }
+            const prompt = preparePromptWithImages(params.prompt, params.attachments);
 
             const queryOptions: Record<string, unknown> = {
               cwd: params.workingDirectory,
@@ -186,6 +169,10 @@ export class ClaudeSDKProvider implements LLMProvider {
               agentProgressSummaries: true,
               // Enable prompt suggestions (predicted next user prompt after each turn)
               promptSuggestions: true,
+              // Enable markdown previews in AskUserQuestion options
+              toolConfig: {
+                askUserQuestion: { previewFormat: 'markdown' },
+              },
               // Controls which Claude Code settings files to load.
               // Default ['user'] loads ~/.claude/settings.json (auth, model).
               // Add 'project' for CLAUDE.md, MCP, skills; 'local' for dev overrides.
@@ -197,27 +184,7 @@ export class ClaudeSDKProvider implements LLMProvider {
               // Dangerous operations (write, delete, network) still trigger canUseTool.
               // These are passed as flag settings (highest priority), so they override
               // any permission rules from user's settings.json.
-              settings: {
-                permissions: {
-                  allow: [
-                    // Read-only tools — always safe
-                    'Read(*)', 'Glob(*)', 'Grep(*)', 'WebSearch(*)', 'WebFetch(*)',
-                    'Agent(*)', 'Task(*)', 'TodoRead(*)', 'ToolSearch(*)',
-                    // Safe Bash commands — read-only, no side effects
-                    'Bash(cat *)', 'Bash(head *)', 'Bash(tail *)', 'Bash(less *)',
-                    'Bash(wc *)', 'Bash(ls *)', 'Bash(tree *)', 'Bash(find *)',
-                    'Bash(grep *)', 'Bash(rg *)', 'Bash(ag *)',
-                    'Bash(file *)', 'Bash(stat *)', 'Bash(du *)', 'Bash(df *)',
-                    'Bash(which *)', 'Bash(type *)', 'Bash(whereis *)',
-                    'Bash(echo *)', 'Bash(printf *)', 'Bash(date *)',
-                    'Bash(pwd)', 'Bash(whoami)', 'Bash(uname *)', 'Bash(env)',
-                    'Bash(git log *)', 'Bash(git status *)', 'Bash(git diff *)',
-                    'Bash(git show *)', 'Bash(git blame *)', 'Bash(git branch *)',
-                    'Bash(node -v *)', 'Bash(npm list *)', 'Bash(npx tsc *)',
-                    'Bash(go version *)', 'Bash(go list *)',
-                  ],
-                },
-              },
+              settings: { permissions: { allow: SAFE_PERMISSIONS } },
               env: buildSubprocessEnv(),
               stderr: (data: string) => {
                 stderrBuf += data;
@@ -229,7 +196,7 @@ export class ClaudeSDKProvider implements LLMProvider {
               canUseTool: async (
                 toolName: string,
                 input: Record<string, unknown>,
-                options: { decisionReason?: string; title?: string; suggestions?: unknown[]; signal?: AbortSignal } = {},
+                options: { decisionReason?: string; title?: string; suggestions?: unknown[]; signal?: AbortSignal; blockedPath?: string; toolUseID?: string; agentID?: string } = {},
               ): Promise<PermissionResult> => {
                 // AskUserQuestion — route to dedicated handler
                 // NOTE: We intentionally do NOT pass the abort signal to the IM handler.
@@ -239,7 +206,7 @@ export class ClaudeSDKProvider implements LLMProvider {
                   const questions = (input as Record<string, unknown>).questions as Array<{
                     question: string;
                     header: string;
-                    options: Array<{ label: string; description?: string }>;
+                    options: Array<{ label: string; description?: string; preview?: string }>;
                     multiSelect: boolean;
                   }> ?? [];
                   if (questions.length > 0) {
@@ -261,12 +228,14 @@ export class ClaudeSDKProvider implements LLMProvider {
                 // NOTE: We intentionally ignore options.signal?.aborted here.
                 // In IM context, the user may not be at the keyboard — the abort signal
                 // should not auto-deny a permission the user hasn't seen yet.
-                const reason = options.decisionReason || options.title || toolName;
-                console.log(`[claude-sdk] canUseTool: ${toolName} → asking user (${reason})`);
+                const reason = options.blockedPath
+                  ? `${options.decisionReason || toolName} (${options.blockedPath})`
+                  : (options.decisionReason || options.title || toolName);
+                console.log(`[tlive:sdk] canUseTool: ${toolName} → asking user (${reason})`);
                 // Do not pass abort signal — IM permissions wait indefinitely for user response
                 const decision = await params.onPermissionRequest(toolName, input, reason);
                 if (decision === 'allow') {
-                  return { behavior: 'allow' as const, updatedInput: input };
+                  return { behavior: 'allow' as const, updatedInput: input, toolUseID: options.toolUseID };
                 }
                 if (decision === 'allow_always') {
                   // SDK API uses behavior:'allow' + updatedPermissions to persist the rule.
@@ -274,10 +243,11 @@ export class ClaudeSDKProvider implements LLMProvider {
                   return {
                     behavior: 'allow' as const,
                     updatedInput: input,
+                    toolUseID: options.toolUseID,
                     ...(options.suggestions ? { updatedPermissions: options.suggestions } : {}),
                   } as PermissionResult;
                 }
-                return { behavior: 'deny' as const, message: 'Denied by user via IM' };
+                return { behavior: 'deny' as const, message: 'Denied by user via IM', toolUseID: options.toolUseID };
               },
             };
 
@@ -301,7 +271,7 @@ export class ClaudeSDKProvider implements LLMProvider {
             for await (const msg of q) {
               const sub = 'subtype' in msg ? `.${msg.subtype}` : '';
               const turns = 'num_turns' in msg ? ` turns=${msg.num_turns}` : '';
-              console.log(`[claude-sdk] msg: ${msg.type}${sub}${turns}`);
+              console.log(`[tlive:sdk] msg: ${msg.type}${sub}${turns}`);
 
               const events = adapter.mapMessage(msg as any);
               for (const event of events) {
@@ -316,7 +286,7 @@ export class ClaudeSDKProvider implements LLMProvider {
               }
             }
 
-            console.log(`[claude-sdk] query ended. streamed=${state.hasStreamedText} text_len=${state.lastAssistantText.length}`);
+            console.log(`[tlive:sdk] query ended. streamed=${state.hasStreamedText} text_len=${state.lastAssistantText.length}`);
             controller.close();
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
@@ -324,13 +294,13 @@ export class ClaudeSDKProvider implements LLMProvider {
             // Check for auth errors first
             const authType = classifyAuthError(message) || (stderrBuf ? classifyAuthError(stderrBuf) : false);
             if (authType === 'cli') {
-              console.error('[claude-sdk] Auth error: not logged in. Run `claude /login` to authenticate.');
+              console.error('[tlive:sdk] Auth error: not logged in. Run `claude /login` to authenticate.');
               controller.enqueue({ kind: 'error', message: 'Not logged in. Run `claude /login` to authenticate.' } as CanonicalEvent);
               controller.close();
               return;
             }
             if (authType === 'api') {
-              console.error('[claude-sdk] Auth error: invalid API key or unauthorized.');
+              console.error('[tlive:sdk] Auth error: invalid API key or unauthorized.');
               controller.enqueue({ kind: 'error', message: 'Invalid API key or unauthorized. Check your credentials.' } as CanonicalEvent);
               controller.close();
               return;
@@ -343,7 +313,7 @@ export class ClaudeSDKProvider implements LLMProvider {
             }
 
             const diagInfo = stderrBuf ? ` [stderr: ${stderrBuf.slice(-200)}]` : '';
-            console.error(`[claude-sdk] query error: ${message}${diagInfo}`);
+            console.error(`[tlive:sdk] query error: ${message}${diagInfo}`);
 
             controller.enqueue({ kind: 'error', message } as CanonicalEvent);
             controller.close();
